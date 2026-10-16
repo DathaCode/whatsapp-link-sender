@@ -319,7 +319,8 @@ export class SendQueue {
 }
 
 function friendlyError(msg: string): string {
-  if (/timed out/i.test(msg)) return 'WhatsApp took too long to respond. Try again later.';
+  if (/^Opening the group timed out/i.test(msg)) return 'WhatsApp took too long to open this group. Nothing was sent; try again later.';
+  if (/timed out/i.test(msg)) return 'WhatsApp didn’t confirm in time. The message may still have been sent: check the group before retrying.';
   if (/not.*found|invalid wid|no lid/i.test(msg)) return 'This group could not be found. Ask an admin to refresh groups.';
   return `WhatsApp did not accept the message (${msg.slice(0, 160)}).`;
 }

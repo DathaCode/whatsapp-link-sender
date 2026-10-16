@@ -361,13 +361,27 @@ export class WaClient extends EventEmitter {
     } catch (e) {
       this.log.debug({ clientId: this.clientId, err: errText(e) }, 'typing indicator skipped');
     }
+    // Check the group exists first: after sending, client.sendMessage() can't tell us that.
+    const exists = await withTimeout(
+      page!.evaluate(async (id) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return !!(await (window as any).WWebJS.getChat(id, { getAsModel: false }));
+      }, groupId),
+      30_000,
+      'Opening the group',
+    );
+    if (!exists) throw new Error('chat not found');
+
+    // whatsapp-web.js 1.34.x returns undefined even for messages that WERE sent: it looks the new
+    // message up by the id it generated, and WhatsApp Web now stores group messages under a
+    // different (LID-based) id. So "no exception" means sent; the return value is ignored.
     const sent = await withTimeout(
       // sendSeen:false avoids a known breakage in recent WhatsApp Web builds.
       client.sendMessage(groupId, text, { sendSeen: false, linkPreview: true }),
       60_000,
       'Sending',
     );
-    if (!sent) throw new Error('chat not found');
+    if (!sent) this.log.debug({ clientId: this.clientId, groupId }, 'sent; library returned no message object (known 1.34.x behaviour)');
   }
 
   private requireClient(): WClient {

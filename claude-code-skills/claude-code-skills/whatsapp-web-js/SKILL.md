@@ -21,6 +21,10 @@ description: "whatsapp-web.js (linked-device WhatsApp Web automation via Puppete
   WhatsApp Web throws `DataError: ... IDBObjectStore: No key or key range specified` (surfaces as a bare `"r"` error).
   We read groups straight from `window.require('WAWebCollections').Chat.getModelsArray()` in `listGroups()`, and send the
   typing indicator with `window.WWebJS.sendChatstate()`. `client.sendMessage()` is fine (it uses `getAsModel:false`).
+- **`client.sendMessage()` returns `undefined` for messages that WERE sent** (1.34.7): after sending it re-reads the message by
+  the id it generated (`Msg.get(newMsgKey)`), but WhatsApp Web stores group messages under a different (LID-based) key.
+  Never treat a falsy return as failure. We check the chat exists first (`WWebJS.getChat(id, {getAsModel:false})`), then treat
+  "no exception" as sent. (Found in prod 2026-10-16: links were delivered but logged as "chat not found".)
 - Group participants are identified by **LID** (`…@lid`), not phone numbers, so never match "me" by phone.
   Use `groupMetadata.participants.iAmMember()` / `iAmAdmin()` / `iAmSuperAdmin()`. The library's `isReadOnly` is just `announce`.
 - Right after linking, the chat list can be empty for a few seconds, so group loading retries (0/10/30/90 s).
