@@ -104,6 +104,12 @@ export const groups = sqliteTable(
     groupId: text('group_id').notNull(),
     name: text('name').notNull(),
     readOnly: integer('read_only', { mode: 'boolean' }).notNull().default(false),
+    /** Why this number can't post here (null = it can). */
+    reason: text('reason'),
+    kind: text('kind', { enum: ['group', 'announcement', 'community'] }).notNull().default('group'),
+    communityId: text('community_id'),
+    communityName: text('community_name'),
+    participants: integer('participants'),
     updatedAt: integer('updated_at').notNull(),
   },
   (t) => [primaryKey({ columns: [t.connectionId, t.groupId] })],

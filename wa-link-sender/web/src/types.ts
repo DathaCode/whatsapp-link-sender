@@ -49,10 +49,17 @@ export interface SafetySettings {
   windowStart: string;
   windowEnd: string;
 }
+export type GroupKind = 'group' | 'announcement' | 'community';
 export interface Group {
   id: string;
   name: string;
   readOnly: boolean;
+  /** Why this number can't post here (null/undefined = it can). */
+  reason?: string | null;
+  kind?: GroupKind;
+  communityId?: string | null;
+  communityName?: string | null;
+  participants?: number | null;
 }
 export interface PresetGroup {
   id: string;

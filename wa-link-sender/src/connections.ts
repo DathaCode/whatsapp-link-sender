@@ -9,7 +9,8 @@ import { connections, groups, sendResults, users, type ConnectionStatus } from '
 import { badRequest, conflict, notFound } from './errors.js';
 import type { Logger } from './logger.js';
 import { localTime } from './time.js';
-import { NotConnectedError, sessionDirFor, type GroupInfo, type WaRuntimeState } from './whatsapp.js';
+import { classifyGroups, type GroupInfo, type RawChat } from './groups.js';
+import { NotConnectedError, sessionDirFor, type WaRuntimeState } from './whatsapp.js';
 
 /** What the manager needs from a running WhatsApp client (WaClient in production, a fake in tests). */
 export interface WaRuntime extends EventEmitter {
@@ -23,6 +24,8 @@ export interface WaRuntime extends EventEmitter {
   logout(): Promise<void>;
   isReady(): boolean;
   listGroups(): Promise<GroupInfo[]>;
+  /** Raw per-chat metadata for diagnostics (fresh from WhatsApp). */
+  inspectChats(fresh: boolean): Promise<RawChat[]>;
   sendText(groupId: string, text: string): Promise<void>;
 }
 export type RuntimeFactory = (clientId: string) => WaRuntime;
@@ -491,10 +494,19 @@ export class ConnectionManager extends EventEmitter {
 
   groupsFor(connectionId: number): GroupInfo[] {
     return this.db
-      .select({ id: groups.groupId, name: groups.name, readOnly: groups.readOnly })
+      .select({
+        id: groups.groupId,
+        name: groups.name,
+        readOnly: groups.readOnly,
+        reason: groups.reason,
+        kind: groups.kind,
+        communityId: groups.communityId,
+        communityName: groups.communityName,
+        participants: groups.participants,
+      })
       .from(groups)
       .where(eq(groups.connectionId, connectionId))
-      .orderBy(sql`lower(${groups.name})`)
+      .orderBy(sql`lower(coalesce(${groups.communityName}, '~'))`, sql`lower(${groups.name})`)
       .all();
   }
 
@@ -521,7 +533,20 @@ export class ConnectionManager extends EventEmitter {
       tx.delete(groups).where(eq(groups.connectionId, a.id)).run();
       if (list.length) {
         tx.insert(groups)
-          .values(list.map((g) => ({ connectionId: a.id, groupId: g.id, name: g.name, readOnly: g.readOnly, updatedAt: now })))
+          .values(
+            list.map((g) => ({
+              connectionId: a.id,
+              groupId: g.id,
+              name: g.name,
+              readOnly: g.readOnly,
+              reason: g.reason ?? null,
+              kind: g.kind ?? 'group',
+              communityId: g.communityId ?? null,
+              communityName: g.communityName ?? null,
+              participants: g.participants ?? null,
+              updatedAt: now,
+            })),
+          )
           .run();
       }
     });
@@ -530,12 +555,57 @@ export class ConnectionManager extends EventEmitter {
       connectionId: a.id,
       details: {
         count: list.length,
+        canPost: list.filter((g) => !g.readOnly).length,
+        communities: new Set(list.map((g) => g.communityId).filter(Boolean)).size,
         added: [...after].filter((g) => !before.has(g)).length,
         removed: [...before].filter((g) => !after.has(g)).length,
       },
     });
     this.emit('groups', a.id);
     return list;
+  }
+
+  /**
+   * Diagnostics: raw WhatsApp metadata for every chat, compared with what the app shows.
+   * Each chat is also written to the application log (docker compose logs app).
+   */
+  async debugGroups(ctx: AuditContext) {
+    const a = this.active();
+    const rt = this.activeRuntime();
+    if (!a || !rt || !rt.isReady()) throw new NotConnectedError();
+    const chats = await rt.inspectChats(true);
+    const classified = new Map(classifyGroups(chats).map((g) => [g.id, g]));
+    const stored = new Map(this.groupsFor(a.id).map((g) => [g.id, g]));
+    const rows = chats.map((c) => {
+      const g = classified.get(c.id);
+      return {
+        ...c,
+        shownAs: g?.name ?? null,
+        kind: g?.kind ?? null,
+        canPost: g ? !g.readOnly : false,
+        reason: g?.reason ?? (c.isGroup ? null : 'Not a group'),
+        inSavedList: stored.has(c.id),
+      };
+    });
+    for (const r of rows) {
+      if (!r.isGroup) continue;
+      this.log.info({ groupDebug: r }, `group debug ${r.id}`);
+    }
+    // Unjoined Community subgroups aren't chats; include them so the comparison is complete.
+    const extra = [...classified.values()].filter((g) => !chats.some((c) => c.id === g.id));
+    const summary = {
+      chats: chats.length,
+      groupChats: rows.filter((r) => r.isGroup).length,
+      communities: rows.filter((r) => r.isParentGroup).length,
+      announcementGroups: rows.filter((r) => r.defaultSubgroup).length,
+      canPost: rows.filter((r) => r.canPost).length,
+      metadataMissing: rows.filter((r) => r.isGroup && !r.metaLoaded).length,
+      fetchErrors: rows.filter((r) => r.metaError).length,
+      unjoinedSubgroups: extra.length,
+      savedListDiffers: rows.filter((r) => r.isGroup && !r.inSavedList).length,
+    };
+    this.audit.record(ctx, { action: 'group.debug_dumped', connectionId: a.id, details: summary });
+    return { summary, chats: rows.filter((r) => r.isGroup), others: rows.filter((r) => !r.isGroup).length, unjoined: extra };
   }
 
   /** Sends through the active number; returns the connection id used. */

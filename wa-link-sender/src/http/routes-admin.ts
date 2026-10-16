@@ -190,6 +190,9 @@ export function adminRoutes(d: Deps): RouteDef[] {
       const groups = await connections.refreshGroups(ctxOf(req));
       res.json({ connectionId: connections.active()?.id ?? null, groups });
     }),
+    route('post', '/api/admin/groups/debug', 'admin', async (req, res) => {
+      res.json(await connections.debugGroups(ctxOf(req)));
+    }),
     route('get', '/api/admin/presets', 'admin', (_req, res) => {
       res.json({ presets: catalog.listPresets() });
     }),

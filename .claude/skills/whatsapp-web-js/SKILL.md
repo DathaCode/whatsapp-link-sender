@@ -25,6 +25,13 @@ description: "whatsapp-web.js (linked-device WhatsApp Web automation via Puppete
   the id it generated (`Msg.get(newMsgKey)`), but WhatsApp Web stores group messages under a different (LID-based) key.
   Never treat a falsy return as failure. We check the chat exists first (`WWebJS.getChat(id, {getAsModel:false})`), then treat
   "no exception" as sent. (Found in prod 2026-10-16: links were delivered but logged as "chat not found".)
+- **WhatsApp Communities** (src/groups.ts `classifyGroups`, unit-tested): the Community is a parent group (`isParentGroup`, can't post);
+  its Announcements group is `defaultSubgroup` (subject = Community name → duplicate "Hiru News" names; only Community admins post);
+  other groups carry `parentGroup` = Community id; parents list `unjoinedSubgroups`. Field names are read from
+  `groupMetadata.serialize()` with fallbacks; if WhatsApp renames them, the admin "Diagnose group list" action (POST
+  /api/admin/groups/debug, also logs `group debug <id>` lines) shows every raw key (`rawKeys`).
+- Refresh = `GroupMetadata.update(wid)` per group (batches of 8, 15 s each) before reading, i.e. fresh from WhatsApp; groups whose
+  `chat.groupMetadata` isn't loaded yet are no longer skipped.
 - Group participants are identified by **LID** (`…@lid`), not phone numbers, so never match "me" by phone.
   Use `groupMetadata.participants.iAmMember()` / `iAmAdmin()` / `iAmSuperAdmin()`. The library's `isReadOnly` is just `announce`.
 - Right after linking, the chat list can be empty for a few seconds, so group loading retries (0/10/30/90 s).

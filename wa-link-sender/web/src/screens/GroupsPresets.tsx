@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react
 import { toast } from 'sonner';
 import { api, errorMessage } from '../api';
 import { ConfirmDialog, Dialog } from '../components/Dialog';
+import { GroupDiagnostics } from '../components/GroupDiagnostics';
 import { GroupPicker } from '../components/GroupPicker';
 import { plural } from '../format';
 import { useLive } from '../store';
@@ -72,13 +73,18 @@ export function GroupsPresets() {
               Groups on the active number
             </h2>
             <p className="hint">
-              {sending?.connection ? `${sending.connection.label}: ${plural(groups.length, 'group')}, ${groups.filter((g) => g.readOnly).length} where it can’t post.` : 'No active number.'}
+              {sending?.connection
+                ? `${sending.connection.label}: ${plural(groups.filter((g) => !g.readOnly).length, 'group')} it can post to, ${groups.filter((g) => g.readOnly).length} it can’t, ${plural(new Set(groups.map((g) => g.communityId).filter(Boolean)).size, 'Community', 'Communities')}.`
+                : 'No active number.'}
             </p>
           </div>
-          <button type="button" className="btn-quiet" onClick={refresh} disabled={refreshing || !sending?.available}>
-            <RefreshCw className={`size-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden />
-            {refreshing ? 'Loading…' : 'Refresh groups'}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <GroupDiagnostics disabled={!sending?.available} />
+            <button type="button" className="btn-primary" onClick={refresh} disabled={refreshing || !sending?.available}>
+              <RefreshCw className={`size-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden />
+              {refreshing ? 'Fetching from WhatsApp…' : 'Refresh groups'}
+            </button>
+          </div>
         </div>
         {!sending?.available && <p className="mt-3 text-sm text-warn">Connect the active number to refresh its groups.</p>}
       </section>

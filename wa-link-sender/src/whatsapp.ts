@@ -4,6 +4,7 @@ import path from 'node:path';
 import QRCode from 'qrcode';
 import wwebjs from 'whatsapp-web.js';
 import type { Config } from './config.js';
+import { classifyGroups, type GroupInfo, type RawChat } from './groups.js';
 import type { Logger } from './logger.js';
 
 const { Client, LocalAuth } = wwebjs;
@@ -11,11 +12,7 @@ type WClient = InstanceType<typeof Client>;
 
 export type WaRuntimeState = 'starting' | 'qr' | 'authenticating' | 'ready' | 'reconnecting' | 'stopped';
 
-export interface GroupInfo {
-  id: string;
-  name: string;
-  readOnly: boolean;
-}
+export type { GroupInfo } from './groups.js';
 
 const CHROMIUM_LOCKS = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
 const INIT_TIMEOUT_MS = 3 * 60_000;
@@ -299,46 +296,116 @@ export class WaClient extends EventEmitter {
   }
 
   /**
-   * Lists groups straight from WhatsApp Web's chat collection.
-   * We avoid client.getChats(): in whatsapp-web.js 1.34.7 it also loads every chat's last
-   * message, which fails inside WhatsApp Web (IndexedDB "No key or key range specified").
-   * Membership/admin checks use WhatsApp's own iAmMember/iAmAdmin, because participants
-   * are listed by LID, not phone number.
+   * Reads every chat from WhatsApp Web's own chat collection, plus each group's metadata,
+   * including WhatsApp Community fields. With `fresh`, each group's metadata is first
+   * re-fetched from WhatsApp's servers (GroupMetadata.update), so nothing comes from a stale cache.
+   * We avoid client.getChats(): in whatsapp-web.js 1.34.7 it also loads every chat's last message,
+   * which fails inside WhatsApp Web (IndexedDB "No key or key range specified").
    */
-  async listGroups(): Promise<GroupInfo[]> {
+  async inspectChats(fresh: boolean): Promise<RawChat[]> {
     const page = this.requireClient().pupPage;
     if (!page) throw new NotConnectedError();
-    const groups = await withTimeout(
-      page.evaluate(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- WhatsApp Web internals are untyped
+    const result = await withTimeout(
+      page.evaluate(async (fresh: boolean) => {
+        /* eslint-disable @typescript-eslint/no-explicit-any -- WhatsApp Web internals are untyped */
         const w = window as any;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const chats: any[] = w.require('WAWebCollections').Chat.getModelsArray();
-        return chats
-          .filter((c) => c?.id?.server === 'g.us' && c.groupMetadata)
-          .map((c) => {
-            const gm = c.groupMetadata;
-            const p = gm.participants;
-            const call = (fn: string, fallback: boolean) => {
-              try {
-                return typeof p?.[fn] === 'function' ? Boolean(p[fn]()) : fallback;
-              } catch {
-                return fallback;
-              }
-            };
-            const member = call('iAmMember', true);
-            const admin = call('iAmAdmin', false) || call('iAmSuperAdmin', false);
-            return {
-              id: String(c.id._serialized),
-              name: String(c.formattedTitle || c.name || gm.subject || c.id.user),
-              readOnly: !member || (Boolean(gm.announce) && !admin) || c.isReadOnly === true,
-            };
-          });
-      }),
-      60_000,
+        const C = w.require('WAWebCollections');
+        const WidF = w.require('WAWebWidFactory');
+        const GM = C.GroupMetadata || C.WAWebGroupMetadataCollection;
+        const chats: any[] = C.Chat.getModelsArray();
+        const idOf = (v: any): string | null => (!v ? null : typeof v === 'string' ? v : (v._serialized ?? null));
+        const errors: Record<string, string> = {};
+
+        if (fresh && GM?.update) {
+          const groupChats = chats.filter((c) => c?.id?.server === 'g.us');
+          for (let i = 0; i < groupChats.length; i += 8) {
+            await Promise.all(
+              groupChats.slice(i, i + 8).map(async (c) => {
+                try {
+                  await Promise.race([
+                    GM.update(WidF.createWid(c.id._serialized)),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15_000)),
+                  ]);
+                } catch (e: any) {
+                  errors[c.id._serialized] = String(e?.message ?? e).slice(0, 200);
+                }
+              }),
+            );
+          }
+        }
+
+        const titleOf = (id: string | null): string | null => {
+          if (!id) return null;
+          try {
+            const ch = C.Chat.get(id);
+            if (ch) return ch.formattedTitle || ch.name || null;
+            return GM?.get?.(id)?.subject ?? null;
+          } catch {
+            return null;
+          }
+        };
+        const listSubgroups = (arr: any) =>
+          (Array.isArray(arr) ? arr : (arr?.getModelsArray?.() ?? []))
+            .map((s: any) => ({ id: idOf(s?.id ?? s?.groupId ?? s), subject: s?.subject ?? null }))
+            .filter((s: { id: string | null }) => !!s.id);
+
+        return chats.map((c) => {
+          const id: string = c.id._serialized;
+          const isGroup = c.id.server === 'g.us';
+          const gm = isGroup ? c.groupMetadata || GM?.get?.(id) : null;
+          let raw: any = {};
+          try {
+            raw = gm?.serialize ? gm.serialize() : {};
+          } catch {
+            raw = {};
+          }
+          const p = gm?.participants;
+          const call = (fn: string): boolean | null => {
+            try {
+              return typeof p?.[fn] === 'function' ? Boolean(p[fn]()) : null;
+            } catch {
+              return null;
+            }
+          };
+          const admin = call('iAmAdmin');
+          const superAdmin = call('iAmSuperAdmin');
+          const parentGroupId = idOf(raw.parentGroup ?? gm?.parentGroup);
+          const size = raw.size ?? gm?.size;
+          return {
+            id,
+            name: c.formattedTitle || c.name || null,
+            subject: raw.subject ?? gm?.subject ?? null,
+            isGroup,
+            archived: !!c.archive,
+            isReadOnly: c.isReadOnly === true,
+            metaLoaded: !!gm,
+            metaError: errors[id] ?? null,
+            isParentGroup: !!(raw.isParentGroup ?? gm?.isParentGroup),
+            parentGroupId,
+            parentGroupName: titleOf(parentGroupId),
+            defaultSubgroup: !!(raw.defaultSubgroup ?? gm?.defaultSubgroup ?? raw.isDefaultSubgroup),
+            hiddenSubgroup: !!(raw.hiddenSubgroup ?? gm?.hiddenSubgroup),
+            announce: !!(raw.announce ?? gm?.announce),
+            restrict: !!(raw.restrict ?? gm?.restrict),
+            iAmMember: gm ? call('iAmMember') : null,
+            iAmAdmin: admin === null && superAdmin === null ? null : !!(admin || superAdmin),
+            participants: typeof p?.length === 'number' ? p.length : (p?.getModelsArray?.().length ?? null),
+            size: typeof size === 'number' ? size : null,
+            unjoinedSubgroups: isGroup ? listSubgroups(raw.unjoinedSubgroups ?? gm?.unjoinedSubgroups) : [],
+            rawKeys: Object.keys(raw).sort(),
+          };
+        });
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+      }, fresh),
+      fresh ? 180_000 : 60_000,
       'Loading groups',
     );
-    return groups.sort((a, b) => a.name.localeCompare(b.name));
+    return result as RawChat[];
+  }
+
+  /** Groups this number can see, classified (community / announcement / group) with the reason it can't post. */
+  async listGroups(): Promise<GroupInfo[]> {
+    return classifyGroups(await this.inspectChats(true));
   }
 
   /** Sends a text message to a group, showing "typing…" for a moment first like a person would. */

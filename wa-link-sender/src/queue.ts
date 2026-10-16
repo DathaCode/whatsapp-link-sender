@@ -268,7 +268,7 @@ export class SendQueue {
     if (!group || group.readOnly) {
       const error = !group
         ? 'The active WhatsApp number is not in this group. Add the number to the group, then refresh groups.'
-        : 'Only admins can post in this group, or the number left it.';
+        : `This number can’t post here: ${group.reason ?? 'only admins can send'}. Refresh groups if that changed.`;
       const auditId = this.recordResult(job, item, conn?.id ?? null, 'failure', error);
       this.jobs.finish(item.id, 'failed', error, auditId);
       this.emitJob(job.id);

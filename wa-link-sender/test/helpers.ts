@@ -5,6 +5,7 @@ import path from 'node:path';
 import request from 'supertest';
 import { parseConfig, type Config } from '../src/config.js';
 import type { WaRuntime } from '../src/connections.js';
+import type { RawChat } from '../src/groups.js';
 import { auditLog } from '../src/db/schema.js';
 import { createApp } from '../src/http/app.js';
 import { logger } from '../src/logger.js';
@@ -89,6 +90,31 @@ export class FakeRuntime extends EventEmitter implements WaRuntime {
   }
   async listGroups() {
     return this.world.groups;
+  }
+  async inspectChats(): Promise<RawChat[]> {
+    return this.world.groups.map((g) => ({
+      id: g.id,
+      name: g.name,
+      subject: g.name,
+      isGroup: true,
+      archived: false,
+      isReadOnly: false,
+      metaLoaded: true,
+      metaError: null,
+      isParentGroup: false,
+      parentGroupId: null,
+      parentGroupName: null,
+      defaultSubgroup: false,
+      hiddenSubgroup: false,
+      announce: g.readOnly,
+      restrict: false,
+      iAmMember: true,
+      iAmAdmin: false,
+      participants: 10,
+      size: 10,
+      unjoinedSubgroups: [],
+      rawKeys: ['announce', 'id', 'subject'],
+    }));
   }
   async sendText(to: string, text: string) {
     if (this.world.failFor.has(to)) throw new Error('boom');

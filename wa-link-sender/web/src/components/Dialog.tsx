@@ -7,12 +7,15 @@ export function Dialog({
   onClose,
   children,
   wide = false,
+  xl = false,
 }: {
   open: boolean;
   title: string;
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  /** Very wide (tables). */
+  xl?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -28,7 +31,7 @@ export function Dialog({
       onClose={onClose}
       onClick={(e) => e.target === ref.current && onClose()}
       aria-labelledby="dialog-title"
-      className={`m-auto w-[calc(100%-2rem)] ${wide ? 'max-w-xl' : 'max-w-md'} rounded-2xl border border-line bg-surface p-0 text-ink shadow-2xl backdrop:bg-black/50`}
+      className={`m-auto w-[calc(100%-2rem)] ${xl ? 'max-w-6xl' : wide ? 'max-w-xl' : 'max-w-md'} rounded-2xl border border-line bg-surface p-0 text-ink shadow-2xl backdrop:bg-black/50`}
     >
       {open && (
         <div className="p-5 sm:p-6">

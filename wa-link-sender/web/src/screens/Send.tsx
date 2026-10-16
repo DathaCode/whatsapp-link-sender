@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { ApiError, api, errorMessage } from '../api';
 import { ChatBubble } from '../components/ChatBubble';
 import { ConfirmDialog } from '../components/Dialog';
-import { GroupPicker } from '../components/GroupPicker';
+import { GroupPicker, sharedCommunityWarning } from '../components/GroupPicker';
 import { JobProgress } from '../components/JobProgress';
 import { PlatformIcon } from '../components/PlatformIcon';
 import { PLATFORM_NAME, estimateSeconds, formatDateTime, formatDuration, pauseText, plural, renderTemplate } from '../format';
@@ -95,6 +95,7 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
   const pickerGroups: Group[] = useMemo(() => {
     if (!opts) return [];
     if (isAdmin) return opts.groups;
+    const live = new Map(opts.groups.map((g) => [g.id, g]));
     const ids = new Set<string>();
     const out: Group[] = [];
     for (const p of opts.presets) {
@@ -102,7 +103,8 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
       for (const g of p.groups) {
         if (ids.has(g.id)) continue;
         ids.add(g.id);
-        out.push({ id: g.id, name: g.name, readOnly: !g.available });
+        // Prefer the live entry (current name, Community, reason); fall back to the preset's snapshot.
+        out.push(live.get(g.id) ?? { id: g.id, name: g.name, readOnly: true, reason: 'Not available on the current WhatsApp number' });
       }
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
@@ -369,6 +371,15 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
               ) : (
                 <GroupPicker groups={pickerGroups} selected={validSelected} onChange={setSelected} />
               )}
+              {sharedCommunityWarning(pickerGroups, validSelected).map((w) => (
+                <p key={w.community} role="status" className="mt-3 flex items-start gap-2 rounded-xl bg-warn-soft px-3 py-2 text-sm text-warn">
+                  <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+                  <span>
+                    <strong>These groups share members.</strong> {w.count} of the selected groups are in the “{w.community}” Community, so people may
+                    get this post more than once.
+                  </span>
+                </p>
+              ))}
             </>
           )}
         </section>
