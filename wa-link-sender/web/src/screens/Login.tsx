@@ -1,9 +1,11 @@
-import { KeyRound } from 'lucide-react';
+import { LogIn } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
-import { api, errorMessage } from '../api';
+import { api, errorMessage, setCsrf } from '../api';
+import type { Me } from '../types';
 
-export function Login({ onSignedIn }: { onSignedIn: () => void }) {
-  const [key, setKey] = useState('');
+export function Login({ onSignedIn, notice }: { onSignedIn: (me: Me) => void; notice?: string }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -12,10 +14,12 @@ export function Login({ onSignedIn }: { onSignedIn: () => void }) {
     setBusy(true);
     setError('');
     try {
-      await api('/api/login', { body: { key: key.trim() } });
-      onSignedIn();
+      const r = await api<{ user: Me; csrf: string }>('/api/auth/login', { body: { username: username.trim(), password } });
+      setCsrf(r.csrf);
+      onSignedIn(r.user);
     } catch (err) {
       setError(errorMessage(err));
+      setPassword('');
     } finally {
       setBusy(false);
     }
@@ -24,36 +28,54 @@ export function Login({ onSignedIn }: { onSignedIn: () => void }) {
   return (
     <main className="grid min-h-dvh place-items-center px-4 py-10">
       <form onSubmit={submit} className="card w-full max-w-sm p-6 sm:p-8" aria-labelledby="login-title">
-        <div className="mb-6 flex size-12 items-center justify-center rounded-2xl bg-accent-soft text-accent">
-          <KeyRound className="size-6" aria-hidden />
-        </div>
+        <img src="/favicon.svg" alt="" className="mb-6 size-12" />
         <h1 id="login-title" className="text-2xl font-bold tracking-tight">
           Link Sender
         </h1>
-        <p className="mt-1 mb-6 text-muted">Share your posts to your WhatsApp groups. Enter the team access key to continue.</p>
-        <label htmlFor="key" className="label">
-          Access key
+        <p className="mt-1 mb-6 text-muted">Sign in to share posts to your WhatsApp groups.</p>
+        {notice && (
+          <p role="status" className="mb-4 rounded-xl bg-warn-soft px-3 py-2 text-sm text-warn">
+            {notice}
+          </p>
+        )}
+        <label htmlFor="username" className="label">
+          Username
         </label>
         <input
-          id="key"
+          id="username"
+          className="field"
+          autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
+          autoFocus
+          required
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+        <label htmlFor="password" className="label mt-4">
+          Password
+        </label>
+        <input
+          id="password"
           type="password"
           className="field"
           autoComplete="current-password"
-          autoFocus
           required
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
           aria-invalid={!!error}
           aria-describedby={error ? 'login-error' : undefined}
         />
         {error && (
-          <p id="login-error" role="alert" className="mt-2 text-sm text-bad">
+          <p id="login-error" role="alert" className="mt-3 text-sm text-bad">
             {error}
           </p>
         )}
-        <button type="submit" className="btn-primary mt-5 w-full" disabled={busy || !key.trim()}>
-          {busy ? 'Checking…' : 'Sign in'}
+        <button type="submit" className="btn-primary mt-6 w-full" disabled={busy || !username.trim() || !password}>
+          <LogIn className="size-4" aria-hidden />
+          {busy ? 'Signing in…' : 'Sign in'}
         </button>
+        <p className="hint mt-4 text-center">Forgot your password? Ask your admin to reset it.</p>
       </form>
     </main>
   );

@@ -1,6 +1,9 @@
+import { eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { diff, type AuditContext, type AuditLog } from './audit.js';
 import type { Config } from './config.js';
-import type { Store } from './db.js';
+import type { Db } from './db/index.js';
+import { settings } from './db/schema.js';
 
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -22,12 +25,14 @@ export const safetySchema = z
   });
 
 export type SafetySettings = z.infer<typeof safetySchema>;
+const KEY = 'safety';
 
-/** Values from .env are the defaults; changes made on the Settings screen are stored in SQLite. */
+/** Values from .env are the defaults; changes made on the Settings page are stored in the database. */
 export class Settings {
   constructor(
     private cfg: Config,
-    private store: Store,
+    private db: Db,
+    private audit: AuditLog,
   ) {}
 
   defaults(): SafetySettings {
@@ -40,21 +45,45 @@ export class Settings {
     };
   }
 
+  private saved(): Partial<SafetySettings> {
+    const row = this.db.select().from(settings).where(eq(settings.key, KEY)).get();
+    return row ? (JSON.parse(row.value) as Partial<SafetySettings>) : {};
+  }
+
   get(): SafetySettings {
-    const saved = this.store.getSetting<Partial<SafetySettings>>('safety') ?? {};
-    const merged = { ...this.defaults(), ...saved };
-    const parsed = safetySchema.safeParse(merged);
+    const parsed = safetySchema.safeParse({ ...this.defaults(), ...this.saved() });
     return parsed.success ? parsed.data : this.defaults();
   }
 
-  update(input: unknown): SafetySettings {
-    const next = safetySchema.parse({ ...this.get(), ...(input as object) });
-    this.store.setSetting('safety', next);
+  private write(value: Partial<SafetySettings>) {
+    this.db
+      .insert(settings)
+      .values({ key: KEY, value: JSON.stringify(value) })
+      .onConflictDoUpdate({ target: settings.key, set: { value: JSON.stringify(value) } })
+      .run();
+  }
+
+  update(ctx: AuditContext, input: unknown): SafetySettings {
+    const before = this.get();
+    const next = safetySchema.parse({ ...before, ...(input as object) });
+    const changes = diff(before, next);
+    if (!Object.keys(changes).length) return before;
+    this.write(next);
+    this.audit.record(ctx, { action: 'settings.updated', targetType: 'settings', targetId: KEY, details: { changes } });
     return next;
   }
 
-  reset(): SafetySettings {
-    this.store.setSetting('safety', {});
-    return this.get();
+  reset(ctx: AuditContext): SafetySettings {
+    const before = this.get();
+    this.write({});
+    const after = this.get();
+    this.audit.record(ctx, {
+      action: 'settings.updated',
+      targetType: 'settings',
+      targetId: KEY,
+      reason: 'reset to .env defaults',
+      details: { changes: diff(before, after) },
+    });
+    return after;
   }
 }

@@ -54,6 +54,23 @@ already in**, via whatsapp-web.js (linked device). Code: `stdrd/wa-link-sender/`
   Verified: test group "10th dev" loads on reconnect and via Refresh.
 - **Pending:** owner to confirm a real send to the test group arrives (Send tab).
 
+## v3: users, roles, connections, audit (2026-10-16, branch feature/users-roles-audit, not committed)
+- Owner decisions: **fresh start** (new DB file `app.sqlite`; old `app.db` + old `session/` folder left unused);
+  **only the active number runs** (a temporary browser only while showing a QR; others `standby`); admins add/activate numbers,
+  never automatic switching; users pick **assigned presets and may untick groups**; **daily cap is per connection**.
+- Stack additions: Drizzle ORM (sqlite-core, migrations in `drizzle/`, run on start), `@node-rs/argon2` (argon2id, prebuilt, no build tools),
+  supertest for HTTP tests. Dockerfile change: only `COPY drizzle ./drizzle` into the runtime image.
+- Every route is declared once in a table with an access level (`public | signed_in | user | admin`) in `src/http/*`; the guard does
+  session → CSRF (`X-CSRF-Token` = HMAC(SESSION_SECRET, session id)) → forced-password-change → role. Any 403 is audited as `access.denied`.
+- Audit log: append-only (no update code path; SQLite triggers block UPDATE and DELETE of rows < 30 days). `send_results.audit_id` links each
+  per-group result to its `send.result` row. Pruning (AUDIT_RETENTION_DAYS) and nightly `VACUUM INTO` backups (02:30 TZ) run via `src/scheduler.ts`.
+- `reset-admin` CLI: `docker compose exec app node dist/cli.js reset-admin [username]`.
+- Verified 2026-10-16: 70 tests (roles on every route, lockout, audit coverage of all required actions, presets, last admin, queue);
+  Docker build + healthy; E2E in browser: forced password change, user creation, USER → admin API = 403 and logged, Logs filter/expand/CSV,
+  connection QR appears. **Pending: owner scans the QR** (Connections → Show QR again), then refresh groups, create presets, assign to users.
+- Docker Desktop port-mapping hides client IPs (audit shows 172.x gateway); behind Caddy the real IP is recorded via TRUST_PROXY.
+- E2E left a test USER `nimali` in the owner's local DB (disable it if unwanted; users are never deleted).
+
 ## Open ideas / not done
 - Healthcheck doesn't auto-restart an unhealthy container on plain Docker (only marks it); the in-app watchdog covers WhatsApp hangs.
 - `npm audit` flags `basic-ftp`/`extract-zip` from puppeteer's browser downloader. Not used at runtime in Docker (download skipped).

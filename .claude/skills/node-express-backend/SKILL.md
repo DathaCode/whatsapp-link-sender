@@ -18,7 +18,13 @@ description: "Node 22 + Express 5 + TypeScript backend patterns used in wa-link-
 - **Config**: all settings come from env, validated once in `parseConfig()`. On failure print a bullet
   list and `exit(1)`. Empty strings mean "use default". Never read `process.env` elsewhere.
 
-## Auth model
+## Auth model (v3: user accounts)
+- Users + roles ADMIN/USER, argon2id via `@node-rs/argon2`, server-side sessions (token hash in SQLite, idle + absolute timeout),
+  lockout per username (also for unknown names, generic messages), per-IP limiter on login. Routes are declared in one table with an
+  access level; add new routes there (never `app.get` directly) so the role-enforcement test covers them automatically.
+- The previous single ACCESS_KEY model below is historical.
+
+## Auth model (v2, historical)
 - Single shared `ACCESS_KEY`. Compare via `timingSafeEqual` on SHA-256 digests.
 - Session token = 32 random bytes in an **httpOnly, SameSite=Strict** cookie (`secure: req.secure`);
   only the token's SHA-256 is stored in SQLite, bound to a fingerprint of the key (changing the key signs everyone out).

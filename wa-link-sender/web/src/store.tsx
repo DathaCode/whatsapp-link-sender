@@ -1,76 +1,79 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { api } from './api';
-import type { Bootstrap, Group, Job, Preset, QueueStatus, SafetySettings, Template, Usage, WaStatus } from './types';
+import type { ConnectionView, Job, Me, QueueStatus, SendingStatus, Usage } from './types';
 
-interface AppState extends Bootstrap {
-  /** Jobs we have seen live updates for, keyed by id (includes items). */
-  jobs: Record<number, Job>;
+interface LiveState {
   live: boolean;
+  sending: SendingStatus | null;
+  queue: QueueStatus | null;
+  usage: Usage | null;
+  /** Jobs seen through live updates, keyed by id. */
+  jobs: Record<number, Job>;
+  /** Admin only. */
+  connections: ConnectionView[] | null;
+  /** Bumps whenever the group list of the active number changes. */
+  groupsVersion: number;
 }
 
-interface AppContextValue {
-  state: AppState;
-  setGroups: (g: Group[]) => void;
-  setPresets: (p: Preset[]) => void;
-  setTemplates: (t: Template[]) => void;
-  setSettings: (s: SafetySettings) => void;
+interface LiveValue extends LiveState {
+  me: Me;
+  isAdmin: boolean;
   upsertJob: (j: Job) => void;
-  reload: () => Promise<void>;
+  setConnections: (c: ConnectionView[]) => void;
+  setSending: (s: SendingStatus) => void;
 }
 
-const Ctx = createContext<AppContextValue | null>(null);
+const Ctx = createContext<LiveValue | null>(null);
 
-export function AppProvider({ initial, children }: { initial: Bootstrap; children: ReactNode }) {
-  const [state, setState] = useState<AppState>(() => ({
-    ...initial,
-    jobs: Object.fromEntries(initial.activeJobs.map((j) => [j.id, j])),
+export function LiveProvider({ me, children, onSignedOut }: { me: Me; children: ReactNode; onSignedOut: () => void }) {
+  const isAdmin = me.role === 'ADMIN';
+  const [state, setState] = useState<LiveState>({
     live: false,
-  }));
+    sending: null,
+    queue: null,
+    usage: null,
+    jobs: {},
+    connections: null,
+    groupsVersion: 0,
+  });
+  const patch = useCallback((p: Partial<LiveState>) => setState((s) => ({ ...s, ...p })), []);
+  const upsertJob = useCallback((j: Job) => setState((s) => ({ ...s, jobs: { ...s.jobs, [j.id]: { ...s.jobs[j.id], ...j } } })), []);
 
-  const patch = useCallback((p: Partial<AppState>) => setState((s) => ({ ...s, ...p })), []);
-  const upsertJob = useCallback((j: Job) => setState((s) => ({ ...s, jobs: { ...s.jobs, [j.id]: j } })), []);
-
-  const reload = useCallback(async () => {
-    const b = await api<Bootstrap>('/api/bootstrap');
-    setState((s) => ({
-      ...s,
-      ...b,
-      jobs: { ...s.jobs, ...Object.fromEntries(b.activeJobs.map((j) => [j.id, j])) },
-    }));
-  }, []);
-
-  // Live updates from the server (Server-Sent Events). The browser reconnects by itself.
   useEffect(() => {
     const es = new EventSource('/api/events');
     const on = <T,>(name: string, fn: (d: T) => void) =>
       es.addEventListener(name, (e) => fn(JSON.parse((e as MessageEvent).data) as T));
     es.onopen = () => patch({ live: true });
     es.onerror = () => patch({ live: false });
-    on<WaStatus>('whatsapp', (whatsapp) => patch({ whatsapp }));
+    on<SendingStatus>('sending', (sending) => patch({ sending }));
+    if (!isAdmin) on<SendingStatus>('sending_user', (sending) => patch({ sending }));
     on<QueueStatus>('queue', (queue) => patch({ queue }));
     on<Usage>('usage', (usage) => patch({ usage }));
-    on<Group[]>('groups', (groups) => patch({ groups }));
     on<Job>('job', upsertJob);
+    on<ConnectionView[]>('connections', (connections) => patch({ connections }));
+    on<unknown>('groups', () => setState((s) => ({ ...s, groupsVersion: s.groupsVersion + 1 })));
+    on<unknown>('signed_out', () => {
+      es.close();
+      onSignedOut();
+    });
     return () => es.close();
-  }, [patch, upsertJob]);
+  }, [isAdmin, patch, upsertJob, onSignedOut]);
 
-  const value = useMemo<AppContextValue>(
+  const value = useMemo<LiveValue>(
     () => ({
-      state,
-      setGroups: (groups) => patch({ groups }),
-      setPresets: (presets) => patch({ presets }),
-      setTemplates: (templates) => patch({ templates }),
-      setSettings: (settings) => patch({ settings }),
+      ...state,
+      me,
+      isAdmin,
       upsertJob,
-      reload,
+      setConnections: (connections) => patch({ connections }),
+      setSending: (sending) => patch({ sending }),
     }),
-    [state, patch, upsertJob, reload],
+    [state, me, isAdmin, upsertJob, patch],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
-export function useApp() {
+export function useLive() {
   const v = useContext(Ctx);
-  if (!v) throw new Error('useApp outside AppProvider');
+  if (!v) throw new Error('useLive outside LiveProvider');
   return v;
 }

@@ -1,23 +1,24 @@
 import { Check, ChevronDown, Copy, ExternalLink, RotateCcw, Search, X } from 'lucide-react';
 import { useCallback, useEffect, useId, useState } from 'react';
 import { toast } from 'sonner';
-import { api, errorMessage } from '../api';
+import { api, errorMessage, qs } from '../api';
 import { PlatformIcon } from '../components/PlatformIcon';
-import { formatDateTime, plural, timeAgo } from '../format';
-import { useApp } from '../store';
-import type { Job, JobStatus } from '../types';
+import { Badge } from '../components/StatusBadge';
+import { formatDateTime, formatTime, plural, timeAgo, type Tone } from '../format';
+import { useLive } from '../store';
+import type { Job, JobStatus, UserView } from '../types';
 
 const PAGE = 30;
 
-const STATUS: Record<JobStatus, { label: string; cls: string }> = {
-  queued: { label: 'Waiting to start', cls: 'bg-surface-2 text-muted' },
-  running: { label: 'Sending', cls: 'bg-accent-soft text-accent' },
-  waiting: { label: 'Paused', cls: 'bg-warn-soft text-warn' },
-  done: { label: 'Done', cls: 'bg-ok-soft text-ok' },
-  cancelled: { label: 'Stopped', cls: 'bg-surface-2 text-muted' },
+const STATUS: Record<JobStatus, { label: string; tone: Tone }> = {
+  queued: { label: 'Waiting to start', tone: 'neutral' },
+  running: { label: 'Sending', tone: 'accent' },
+  waiting: { label: 'Paused', tone: 'warn' },
+  done: { label: 'Done', tone: 'ok' },
+  cancelled: { label: 'Stopped', tone: 'neutral' },
 };
 
-async function copyText(text: string) {
+export async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text);
   } catch {
@@ -34,20 +35,24 @@ async function copyText(text: string) {
 }
 
 export function History() {
-  const { state, upsertJob } = useApp();
+  const { jobs: liveJobs, upsertJob, isAdmin } = useLive();
   const [search, setSearch] = useState('');
+  const [userId, setUserId] = useState('');
+  const [users, setUsers] = useState<UserView[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<number | null>(null);
   const searchId = useId();
 
-  const load = useCallback(async (q: string, offset: number) => {
+  useEffect(() => {
+    if (isAdmin) api<{ users: UserView[] }>('/api/admin/users').then((r) => setUsers(r.users), () => {});
+  }, [isAdmin]);
+
+  const load = useCallback(async (q: string, uid: string, offset: number) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
-      if (q.trim()) params.set('search', q.trim());
-      const r = await api<{ jobs: Job[] }>(`/api/jobs?${params}`);
+      const r = await api<{ jobs: Job[] }>(`/api/jobs${qs({ limit: PAGE, offset, search: q.trim(), userId: uid })}`);
       setJobs((prev) => (offset ? [...prev, ...r.jobs] : r.jobs));
       setHasMore(r.jobs.length === PAGE);
     } catch (e) {
@@ -58,28 +63,17 @@ export function History() {
   }, []);
 
   useEffect(() => {
-    const t = setTimeout(() => void load(search, 0), 250);
+    const t = setTimeout(() => void load(search, userId, 0), 250);
     return () => clearTimeout(t);
-  }, [search, load]);
+  }, [search, userId, load]);
 
-  // Merge live updates (progress, new retries) into the list.
+  // Merge live progress into the visible rows.
   useEffect(() => {
-    setJobs((prev) => {
-      const live = Object.values(state.jobs);
-      const merged = prev.map((j) => {
-        const l = state.jobs[j.id];
-        return l ? { ...j, ...l, items: l.items ?? j.items } : j;
-      });
-      const fresh = live.filter((l) => !prev.some((j) => j.id === l.id) && (!search || l.url.includes(search)));
-      return fresh.length ? [...fresh, ...merged].sort((a, b) => b.id - a.id) : merged;
-    });
-  }, [state.jobs, search]);
+    setJobs((prev) => prev.map((j) => (liveJobs[j.id] ? { ...j, ...liveJobs[j.id], items: liveJobs[j.id]!.items ?? j.items } : j)));
+  }, [liveJobs]);
 
   const toggle = async (job: Job) => {
-    if (open === job.id) {
-      setOpen(null);
-      return;
-    }
+    if (open === job.id) return setOpen(null);
     setOpen(job.id);
     try {
       const r = await api<{ job: Job }>(`/api/jobs/${job.id}`);
@@ -93,7 +87,8 @@ export function History() {
     try {
       const r = await api<{ job: Job }>(`/api/jobs/${job.id}/retry-failed`, { body: {} });
       upsertJob(r.job);
-      toast.success(`Retrying ${plural(r.job.total, 'group')}. Follow progress on the Send tab.`);
+      setJobs((prev) => [r.job, ...prev]);
+      toast.success(`Retrying ${plural(r.job.total, 'group')}. Follow progress on the Send page.`);
     } catch (e) {
       toast.error(errorMessage(e));
     }
@@ -101,24 +96,34 @@ export function History() {
 
   return (
     <div className="space-y-4">
-      <div className="relative">
-        <label htmlFor={searchId} className="sr-only">
-          Search history by link
-        </label>
-        <Search className="pointer-events-none absolute top-1/2 left-3.5 size-5 -translate-y-1/2 text-muted" aria-hidden />
-        <input
-          id={searchId}
-          type="search"
-          className="field min-h-12 pl-11"
-          placeholder="Search by link"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="relative flex-1">
+          <label htmlFor={searchId} className="sr-only">
+            Search by link
+          </label>
+          <Search className="pointer-events-none absolute top-1/2 left-3.5 size-5 -translate-y-1/2 text-muted" aria-hidden />
+          <input id={searchId} type="search" className="field min-h-12 pl-11" placeholder="Search by link" value={search} onChange={(e) => setSearch(e.target.value)} />
+        </div>
+        {isAdmin && (
+          <div className="sm:w-56">
+            <label htmlFor="hist-user" className="sr-only">
+              Filter by user
+            </label>
+            <select id="hist-user" className="field min-h-12" value={userId} onChange={(e) => setUserId(e.target.value)}>
+              <option value="">Everyone</option>
+              {users.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.displayName} ({u.username})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       {!loading && jobs.length === 0 && (
         <p className="card p-8 text-center text-muted">
-          {search ? `Nothing sent matches “${search}”.` : 'Nothing has been sent yet. Your sends will be listed here.'}
+          {search ? `Nothing sent matches “${search}”.` : 'Nothing has been sent yet. Sends will be listed here.'}
         </p>
       )}
 
@@ -131,13 +136,7 @@ export function History() {
               <div className="flex items-start gap-3 p-4">
                 <PlatformIcon platform={job.platform} size={28} />
                 <div className="min-w-0 flex-1">
-                  <a
-                    href={job.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block truncate font-semibold hover:text-accent hover:underline"
-                    title={job.url}
-                  >
+                  <a href={job.url} target="_blank" rel="noopener noreferrer" className="block truncate font-semibold hover:text-accent hover:underline" title={job.url}>
                     {job.url.replace(/^https:\/\/(www\.)?/, '')}
                     <ExternalLink className="ml-1 inline size-3.5 align-baseline text-muted" aria-label="(opens in new tab)" />
                   </a>
@@ -145,10 +144,11 @@ export function History() {
                     <time dateTime={new Date(job.createdAt).toISOString()} title={formatDateTime(job.createdAt)}>
                       {timeAgo(job.createdAt)}
                     </time>
+                    {isAdmin && <> · by {job.username}</>}
                     {job.parentJobId ? ' · retry' : ''}
                   </p>
                   <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-                    <span className={`rounded-full px-2.5 py-0.5 font-semibold ${st.cls}`}>{st.label}</span>
+                    <Badge tone={st.tone}>{st.label}</Badge>
                     <span className="inline-flex items-center gap-1 text-ok">
                       <Check className="size-4" aria-hidden /> {job.sent} sent
                     </span>
@@ -207,7 +207,7 @@ export function History() {
                         <span className="block truncate">{it.groupName}</span>
                         {it.error && <span className="block text-bad">{it.error}</span>}
                       </span>
-                      {it.attemptedAt && <span className="shrink-0 text-muted">{new Date(it.attemptedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
+                      {it.attemptedAt && <span className="shrink-0 text-muted">{formatTime(it.attemptedAt)}</span>}
                     </li>
                   ))}
                 </ul>
@@ -218,7 +218,7 @@ export function History() {
       </ul>
 
       {hasMore && (
-        <button type="button" className="btn-quiet w-full" disabled={loading} onClick={() => void load(search, jobs.length)}>
+        <button type="button" className="btn-quiet w-full" disabled={loading} onClick={() => void load(search, userId, jobs.length)}>
           {loading ? 'Loading…' : 'Show older'}
         </button>
       )}

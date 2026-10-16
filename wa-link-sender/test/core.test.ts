@@ -70,30 +70,48 @@ describe('sending hours', () => {
 });
 
 describe('config', () => {
-  const base = { ACCESS_KEY: 'a-long-enough-secret' };
+  const base = { SESSION_SECRET: 'x'.repeat(40) };
   it('applies defaults', () => {
     const r = parseConfig(base);
-    expect(r.ok && r.config.PORT).toBe(3100);
-    expect(r.ok && r.config.TZ).toBe('Asia/Colombo');
-    expect(r.ok && r.config.MIN_DELAY_SECONDS).toBe(15);
-    expect(r.ok && r.config.MAX_DELAY_SECONDS).toBe(40);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.config.PORT).toBe(3100);
+    expect(r.config.TZ).toBe('Asia/Colombo');
+    expect(r.config.MIN_DELAY_SECONDS).toBe(15);
+    expect(r.config.SESSION_IDLE_HOURS).toBe(8);
+    expect(r.config.SESSION_MAX_DAYS).toBe(7);
+    expect(r.config.LOGIN_MAX_ATTEMPTS).toBe(5);
+    expect(r.config.LOGIN_LOCK_MINUTES).toBe(15);
+    expect(r.config.AUDIT_RETENTION_DAYS).toBe(365);
+    expect(r.config.BACKUP_KEEP).toBe(14);
+    expect(r.config.TRUST_PROXY).toBe('loopback, uniquelocal');
   });
   it('reports clear errors', () => {
-    const r = parseConfig({ ACCESS_KEY: 'short', MIN_DELAY_SECONDS: '50', MAX_DELAY_SECONDS: '10', TZ: 'Mars/Base', SEND_WINDOW_START: '8am' });
+    const r = parseConfig({ SESSION_SECRET: 'short', MIN_DELAY_SECONDS: '50', MAX_DELAY_SECONDS: '10', TZ: 'Mars/Base', SEND_WINDOW_START: '8am', INITIAL_ADMIN_PASSWORD: 'short' });
     expect(r.ok).toBe(false);
     if (!r.ok) {
-      const all = r.errors.join('\n');
-      expect(all).toMatch(/ACCESS_KEY must be at least 12/);
+      const all = r.errors.join(' | ');
+      expect(all).toMatch(/SESSION_SECRET must be at least 32/);
       expect(all).toMatch(/TZ is not a valid time zone/);
       expect(all).toMatch(/SEND_WINDOW_START must look like 08:00/);
+      expect(all).toMatch(/INITIAL_ADMIN_PASSWORD must be at least 10/);
     }
   });
-  it('rejects max < min delay', () => {
-    const r = parseConfig({ ...base, MIN_DELAY_SECONDS: '30', MAX_DELAY_SECONDS: '20' });
-    expect(r.ok).toBe(false);
+  it('requires SESSION_SECRET', () => {
+    expect(parseConfig({}).ok).toBe(false);
   });
-  it('rejects the example key', () => {
-    expect(parseConfig({ ACCESS_KEY: 'change-me-to-a-long-secret' }).ok).toBe(false);
+  it('parses TRUST_PROXY forms', () => {
+    const v = (t: string) => {
+      const r = parseConfig({ ...base, TRUST_PROXY: t });
+      return r.ok ? r.config.TRUST_PROXY : 'ERR';
+    };
+    expect(v('true')).toBe(true);
+    expect(v('false')).toBe(false);
+    expect(v('1')).toBe(1);
+    expect(v('10.0.0.0/8')).toBe('10.0.0.0/8');
+  });
+  it('keeps audit retention at 30 days or more', () => {
+    expect(parseConfig({ ...base, AUDIT_RETENTION_DAYS: '7' }).ok).toBe(false);
   });
 });
 

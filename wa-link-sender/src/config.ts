@@ -20,26 +20,66 @@ const intFromEnv = (name: string, def: number, min: number, max: number) =>
     .max(max, `${name} must be at most ${max}`)
     .default(def);
 
+const numFromEnv = (name: string, def: number, min: number, max: number) =>
+  z.coerce
+    .number({ error: `${name} must be a number` })
+    .min(min, `${name} must be at least ${min}`)
+    .max(max, `${name} must be at most ${max}`)
+    .default(def);
+
+/**
+ * TRUST_PROXY follows Express's "trust proxy" setting:
+ *   false / true, a hop count ("1"), or a comma list of addresses/presets
+ *   ("loopback, uniquelocal" = the local machine and private Docker networks).
+ */
+function parseTrustProxy(v: string): boolean | number | string {
+  const s = v.trim().toLowerCase();
+  if (s === 'true') return true;
+  if (s === 'false') return false;
+  if (/^\d+$/.test(s)) return Number(s);
+  return v.trim();
+}
+
 const schema = z
   .object({
     PORT: intFromEnv('PORT', 3100, 1, 65535),
-    ACCESS_KEY: z
-      .string({ error: 'ACCESS_KEY is missing. Set a long random password in .env' })
-      .min(12, 'ACCESS_KEY must be at least 12 characters long')
-      .refine((v) => !/^change-?me/i.test(v), 'ACCESS_KEY still has the example value. Pick your own secret'),
     TZ: z
       .string()
       .default('Asia/Colombo')
       .refine(isValidTimeZone, 'TZ is not a valid time zone name (example: Asia/Colombo)'),
+
+    // ---- accounts & sessions ----
+    INITIAL_ADMIN_USERNAME: z
+      .string()
+      .regex(/^[a-zA-Z0-9._-]{3,32}$/, 'INITIAL_ADMIN_USERNAME must be 3-32 letters, digits, dots, dashes or underscores')
+      .optional(),
+    INITIAL_ADMIN_PASSWORD: z.string().min(10, 'INITIAL_ADMIN_PASSWORD must be at least 10 characters').optional(),
+    SESSION_SECRET: z
+      .string({ error: 'SESSION_SECRET is missing. Set a long random value in .env (see .env.example)' })
+      .min(32, 'SESSION_SECRET must be at least 32 characters')
+      .refine((v) => !/^change-?me/i.test(v), 'SESSION_SECRET still has the example value'),
+    SESSION_IDLE_HOURS: numFromEnv('SESSION_IDLE_HOURS', 8, 0.25, 24 * 30),
+    SESSION_MAX_DAYS: numFromEnv('SESSION_MAX_DAYS', 7, 0.1, 365),
+    LOGIN_MAX_ATTEMPTS: intFromEnv('LOGIN_MAX_ATTEMPTS', 5, 1, 100),
+    LOGIN_LOCK_MINUTES: intFromEnv('LOGIN_LOCK_MINUTES', 15, 1, 24 * 60),
+    TRUST_PROXY: z.string().default('loopback, uniquelocal').transform(parseTrustProxy),
+
+    // ---- audit & backups ----
+    AUDIT_RETENTION_DAYS: intFromEnv('AUDIT_RETENTION_DAYS', 365, 30, 3650),
+    BACKUP_KEEP: intFromEnv('BACKUP_KEEP', 14, 1, 365),
+
+    // ---- sending safety defaults (Settings page can override) ----
     MIN_DELAY_SECONDS: intFromEnv('MIN_DELAY_SECONDS', 15, 5, 3600),
     MAX_DELAY_SECONDS: intFromEnv('MAX_DELAY_SECONDS', 40, 5, 3600),
     DAILY_MESSAGE_CAP: intFromEnv('DAILY_MESSAGE_CAP', 150, 1, 10000),
     SEND_WINDOW_START: z.string().default('08:00').refine((v) => HHMM.test(v), 'SEND_WINDOW_START must look like 08:00'),
     SEND_WINDOW_END: z.string().default('21:00').refine((v) => HHMM.test(v), 'SEND_WINDOW_END must look like 21:00'),
+
+    // ---- paths & runtime ----
     DATA_DIR: z.string().default('./data'),
     WWEBJS_AUTH_DIR: z.string().default('./.wwebjs_auth'),
     WWEBJS_CACHE_DIR: z.string().default('./.wwebjs_cache'),
-    LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+    LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
     HEADLESS: z
       .enum(['true', 'false'])
       .default('true')
@@ -54,11 +94,7 @@ const schema = z
     path: ['SEND_WINDOW_END'],
   });
 
-export type Config = Omit<z.infer<typeof schema>, 'DATA_DIR' | 'WWEBJS_AUTH_DIR' | 'WWEBJS_CACHE_DIR'> & {
-  DATA_DIR: string;
-  WWEBJS_AUTH_DIR: string;
-  WWEBJS_CACHE_DIR: string;
-};
+export type Config = z.infer<typeof schema>;
 
 /** Parses env vars; returns either a config or a list of human-readable problems. */
 export function parseConfig(env: NodeJS.ProcessEnv): { ok: true; config: Config } | { ok: false; errors: string[] } {

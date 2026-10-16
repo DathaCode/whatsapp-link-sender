@@ -1,57 +1,62 @@
-import { AlertTriangle, ClipboardPaste, Info, Save, Send as SendIcon, Shuffle, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { AlertTriangle, Check, ClipboardPaste, Send as SendIcon, Shuffle, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { toast } from 'sonner';
 import { ApiError, api, errorMessage } from '../api';
-import { ConfirmDialog, Dialog } from '../components/Dialog';
+import { ConfirmDialog } from '../components/Dialog';
 import { GroupPicker } from '../components/GroupPicker';
 import { JobProgress } from '../components/JobProgress';
 import { PlatformIcon } from '../components/PlatformIcon';
-import { PLATFORM_NAME, estimateSeconds, formatDateTime, formatDuration, plural, renderTemplate } from '../format';
-import { useApp } from '../store';
-import type { Job, LinkCheck, Preset } from '../types';
+import { PLATFORM_NAME, estimateSeconds, formatDateTime, formatDuration, pauseText, plural, renderTemplate } from '../format';
+import { useLive } from '../store';
+import type { Group, Job, LinkCheck, SendOptions } from '../types';
 
-const SELECTION_KEY = 'wls.selectedGroups';
 const TEMPLATE_KEY = 'wls.template';
-
-function loadLocal<T>(key: string, fallback: T): T {
+const loadLocal = (k: string, d: string) => {
   try {
-    const v = localStorage.getItem(key);
-    return v ? (JSON.parse(v) as T) : fallback;
+    return localStorage.getItem(k) ?? d;
   } catch {
-    return fallback;
+    return d;
   }
-}
-function saveLocal(key: string, value: unknown) {
+};
+const saveLocal = (k: string, v: string) => {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    localStorage.setItem(k, v);
   } catch {
-    /* private mode etc. */
+    /* private mode */
   }
-}
+};
 
 export function Send({ onShowHistory }: { onShowHistory: () => void }) {
-  const { state, setPresets, upsertJob } = useApp();
-  const { groups, presets, templates, settings, usage, whatsapp } = state;
+  const live = useLive();
+  const { isAdmin, upsertJob, sending: liveSending, usage: liveUsage, groupsVersion } = live;
+  const [opts, setOpts] = useState<SendOptions | null>(null);
+  const [loadError, setLoadError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setOpts(await api<SendOptions>('/api/send/options'));
+      setLoadError('');
+    } catch (e) {
+      setLoadError(errorMessage(e));
+    }
+  }, []);
+  const activeConnectionId = liveSending?.connection?.id ?? null;
+  useEffect(() => {
+    void load();
+  }, [load, groupsVersion, activeConnectionId]);
 
   const [url, setUrl] = useState('');
   const [check, setCheck] = useState<LinkCheck | null>(null);
   const [checking, setChecking] = useState(false);
-  const [templateChoice, setTemplateChoice] = useState<string>(() => loadLocal(TEMPLATE_KEY, 'rotate'));
-  const [selected, setSelected] = useState<Set<string>>(() => new Set(loadLocal<string[]>(SELECTION_KEY, [])));
+  const [templateChoice, setTemplateChoice] = useState(() => loadLocal(TEMPLATE_KEY, 'rotate'));
+  const [presetIds, setPresetIds] = useState<Set<number>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [previewSeed, setPreviewSeed] = useState(0);
   const [sending, setSending] = useState(false);
-  const [duplicate, setDuplicate] = useState<{ at: number; groups: number } | null>(null);
-  const [savePresetOpen, setSavePresetOpen] = useState(false);
-  const [recentJobId, setRecentJobId] = useState<number | null>(null);
+  const [duplicate, setDuplicate] = useState<{ at: number; groups: number; by: string } | null>(null);
+  const [myJobIds, setMyJobIds] = useState<number[]>([]);
   const urlRef = useRef<HTMLInputElement>(null);
 
-  // Forget selections for groups that no longer exist.
-  const validSelected = useMemo(() => {
-    const ok = new Set(groups.filter((g) => !g.readOnly).map((g) => g.id));
-    return new Set([...selected].filter((id) => ok.has(id)));
-  }, [selected, groups]);
-
-  useEffect(() => saveLocal(SELECTION_KEY, [...selected]), [selected]);
   useEffect(() => saveLocal(TEMPLATE_KEY, templateChoice), [templateChoice]);
 
   // Validate + normalize the link on the server as the user types (debounced).
@@ -74,31 +79,83 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
     return () => clearTimeout(t);
   }, [url]);
 
+  const sendingStatus = liveSending ?? opts?.sending ?? null;
+  const usage = liveUsage ?? opts?.usage ?? null;
+  const settings = opts?.settings ?? null;
+  const templates = opts?.templates ?? [];
   const activeTemplates = templates.filter((t) => t.active);
   const chosenTemplate = templateChoice === 'rotate' ? null : templates.find((t) => String(t.id) === templateChoice);
   useEffect(() => {
-    if (templateChoice !== 'rotate' && !chosenTemplate) setTemplateChoice('rotate');
-  }, [templateChoice, chosenTemplate]);
+    if (opts && templateChoice !== 'rotate' && !chosenTemplate) setTemplateChoice('rotate');
+  }, [opts, templateChoice, chosenTemplate]);
 
-  const previewTemplate =
-    chosenTemplate ?? (activeTemplates.length ? activeTemplates[previewSeed % activeTemplates.length] : undefined);
+  // Which groups can be ticked: admins = every group on the active number; users = groups in chosen presets.
+  const sendable = useMemo(() => new Set((opts?.groups ?? []).filter((g) => !g.readOnly).map((g) => g.id)), [opts]);
+  const pickerGroups: Group[] = useMemo(() => {
+    if (!opts) return [];
+    if (isAdmin) return opts.groups;
+    const ids = new Set<string>();
+    const out: Group[] = [];
+    for (const p of opts.presets) {
+      if (!presetIds.has(p.id)) continue;
+      for (const g of p.groups) {
+        if (ids.has(g.id)) continue;
+        ids.add(g.id);
+        out.push({ id: g.id, name: g.name, readOnly: !g.available });
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }, [opts, isAdmin, presetIds]);
+
+  const validSelected = useMemo(
+    () => new Set([...selected].filter((id) => sendable.has(id) && pickerGroups.some((g) => g.id === id))),
+    [selected, sendable, pickerGroups],
+  );
+
+  const togglePreset = (id: number) => {
+    if (!opts) return;
+    const preset = opts.presets.find((p) => p.id === id);
+    if (!preset) return;
+    const next = new Set(presetIds);
+    const groupIds = preset.groups.filter((g) => g.available !== false && sendable.has(g.id)).map((g) => g.id);
+    const sel = new Set(selected);
+    if (next.has(id)) {
+      next.delete(id);
+      // Remove groups that no other chosen preset still includes.
+      const keep = new Set(opts.presets.filter((p) => next.has(p.id)).flatMap((p) => p.groups.map((g) => g.id)));
+      for (const g of groupIds) if (!keep.has(g)) sel.delete(g);
+    } else {
+      next.add(id);
+      for (const g of groupIds) sel.add(g);
+    }
+    setPresetIds(next);
+    setSelected(sel);
+  };
+
+  const previewTemplate = chosenTemplate ?? (activeTemplates.length ? activeTemplates[previewSeed % activeTemplates.length] : undefined);
   const linkForPreview = check?.ok && check.url ? check.url : 'https://…';
   const previewText = previewTemplate ? renderTemplate(previewTemplate.body, linkForPreview) : linkForPreview;
 
   const count = validSelected.size;
-  const eta = formatDuration(estimateSeconds(count, settings));
-  const remainingToday = Math.max(0, usage.cap - usage.used);
+  const eta = settings ? formatDuration(estimateSeconds(count, settings)) : '';
+  const remainingToday = usage ? Math.max(0, usage.cap - usage.used) : Infinity;
 
-  const liveJobs = Object.values(state.jobs)
-    .filter((j) => j.status === 'queued' || j.status === 'running' || j.status === 'waiting' || j.id === recentJobId)
+  const liveJobs = Object.values(live.jobs)
+    .filter(
+      (j) =>
+        (j.status === 'queued' || j.status === 'running' || j.status === 'waiting' || myJobIds.includes(j.id)) &&
+        (isAdmin || j.userId === live.me.id),
+    )
     .sort((a, b) => a.id - b.id);
 
-  const canSend = !!check?.ok && count > 0 && !sending;
+  const paused = !!sendingStatus && !sendingStatus.accepting;
   let blocker = '';
-  if (!url.trim()) blocker = 'Paste a link to start.';
+  if (paused) blocker = pauseText(sendingStatus!.reason, isAdmin);
+  else if (!url.trim()) blocker = 'Paste a link to start.';
   else if (checking) blocker = 'Checking the link…';
   else if (check && !check.ok) blocker = check.error ?? 'That link can’t be sent.';
-  else if (count === 0) blocker = 'Choose at least one group.';
+  else if (count === 0) blocker = isAdmin ? 'Choose at least one group.' : 'Choose a group list, then the groups to send to.';
+  const canSend = !blocker && !!check?.ok && !sending;
 
   const paste = async () => {
     try {
@@ -122,22 +179,19 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
         body: {
           url: check.url,
           groupIds: [...validSelected],
+          presetIds: [...presetIds],
           templateId: chosenTemplate ? chosenTemplate.id : null,
           confirmDuplicate,
         },
       });
       upsertJob(r.job);
-      setRecentJobId(r.job.id);
+      setMyJobIds((ids) => [...ids, r.job.id]);
       setUrl('');
       setDuplicate(null);
-      toast.success(
-        whatsapp.state === 'ready'
-          ? `Sending to ${plural(r.job.total, 'group')}. You can leave this page; it keeps going.`
-          : `Saved. It will send to ${plural(r.job.total, 'group')} when WhatsApp is connected.`,
-      );
+      toast.success(`Sending to ${plural(r.job.total, 'group')}. You can leave this page; it keeps going.`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && e.data.duplicate) {
-        setDuplicate(e.data.duplicate as { at: number; groups: number });
+        setDuplicate(e.data.duplicate as { at: number; groups: number; by: string });
       } else {
         toast.error(errorMessage(e));
       }
@@ -151,26 +205,26 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
     if (canSend) void doSend(false);
   };
 
-  const applyPreset = (p: Preset) => {
-    setSelected(new Set(p.groupIds));
-    const missing = p.groupIds.filter((id) => !groups.some((g) => g.id === id && !g.readOnly)).length;
-    toast.message(`Selected “${p.name}”`, {
-      description: missing ? `${plural(missing, 'group')} from this list can’t be used any more and were skipped.` : undefined,
-    });
-  };
+  if (loadError) {
+    return (
+      <div className="card p-6 text-center">
+        <p className="font-semibold">Couldn’t load the send page</p>
+        <p className="hint mt-1">{loadError}</p>
+        <button type="button" className="btn-primary mt-4" onClick={() => void load()}>
+          Try again
+        </button>
+      </div>
+    );
+  }
+  if (!opts) return <p className="py-10 text-center text-muted">Loading…</p>;
+
+  const noPresets = !isAdmin && opts.presets.length === 0;
 
   return (
     <div className="space-y-4">
       {liveJobs.map((j) => (
-        <JobProgress key={j.id} job={j} />
+        <JobProgress key={j.id} job={j} settings={settings} />
       ))}
-
-      {whatsapp.state !== 'ready' && (
-        <p className="flex items-start gap-2 rounded-xl bg-warn-soft px-4 py-3 text-sm text-warn">
-          <Info className="mt-0.5 size-4 shrink-0" aria-hidden />
-          WhatsApp isn’t connected right now. You can still prepare a send. It will start when the connection is back.
-        </p>
-      )}
 
       <form onSubmit={onSubmit} className="space-y-4" aria-label="Send a link">
         {/* 1. Link */}
@@ -214,7 +268,6 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
               <span className="sr-only sm:hidden">Paste link</span>
             </button>
           </div>
-
           <div id="url-status" aria-live="polite" className="mt-3 min-h-6">
             {check?.ok && check.platform && (
               <div className="flex items-center gap-2.5">
@@ -232,9 +285,8 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
             {check?.ok && check.previous && (
               <p className="mt-2 flex items-start gap-2 rounded-xl bg-warn-soft px-3 py-2 text-sm text-warn">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
-                This link was already used on {formatDateTime(check.previous.at)}
-                {check.previous.groups ? ` (sent to ${plural(check.previous.groups, 'group')})` : ''}. You’ll be asked to confirm
-                before sending it again.
+                Already sent on {formatDateTime(check.previous.at)} by {check.previous.by}
+                {check.previous.groups ? ` to ${plural(check.previous.groups, 'group')}` : ''}. You’ll be asked to confirm before sending it again.
               </p>
             )}
           </div>
@@ -245,15 +297,8 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
           <label htmlFor="template" className="mb-2 block text-lg font-bold">
             2. Message
           </label>
-          <select
-            id="template"
-            className="field"
-            value={templateChoice}
-            onChange={(e) => setTemplateChoice(e.target.value)}
-          >
-            <option value="rotate">
-              Mix it up ({plural(activeTemplates.length, 'template')} in turn)
-            </option>
+          <select id="template" className="field" value={templateChoice} onChange={(e) => setTemplateChoice(e.target.value)}>
+            <option value="rotate">Mix it up ({plural(activeTemplates.length, 'template')} in turn)</option>
             {templates.map((t) => (
               <option key={t.id} value={t.id}>
                 Always use: {t.name}
@@ -276,7 +321,6 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
             <div className="rounded-2xl rounded-tl-sm bg-surface-2 px-4 py-3 break-words whitespace-pre-wrap" aria-live="polite">
               {previewText}
             </div>
-            <p className="hint mt-1.5">Using different wording each time looks more natural to WhatsApp. Edit templates in Settings.</p>
           </div>
         </section>
 
@@ -285,62 +329,66 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
           <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="text-lg font-bold">3. Groups</h2>
             <span className="text-sm font-semibold text-accent" aria-live="polite">
-              {count} of {groups.filter((g) => !g.readOnly).length} selected
+              {count} selected
             </span>
           </div>
 
-          {presets.length > 0 && (
-            <div className="mb-3">
-              <p className="mb-1.5 text-sm font-semibold">Saved group lists</p>
-              <div className="flex flex-wrap gap-2">
-                {presets.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => applyPreset(p)}
-                    className="min-h-10 rounded-full border border-line bg-surface px-3.5 text-sm font-semibold hover:border-accent hover:text-accent"
-                  >
-                    {p.name} <span className="font-normal text-muted">· {p.groupIds.length}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <GroupPicker groups={groups} selected={validSelected} onChange={setSelected} />
-
-          {count > 0 && (
-            <button
-              type="button"
-              className="mt-3 inline-flex items-center gap-1.5 text-sm font-semibold text-accent"
-              onClick={() => setSavePresetOpen(true)}
-            >
-              <Save className="size-4" aria-hidden /> Save these {count} groups as a list
-            </button>
+          {noPresets ? (
+            <p className="rounded-xl border border-dashed border-line p-6 text-center text-muted">
+              You don’t have any group lists yet. Ask your admin to give you access to one.
+            </p>
+          ) : (
+            <>
+              {opts.presets.length > 0 && (
+                <fieldset className="mb-4">
+                  <legend className="mb-2 text-sm font-semibold">{isAdmin ? 'Quick select a preset' : 'Your group lists'}</legend>
+                  <div className="flex flex-wrap gap-2">
+                    {opts.presets.map((p) => {
+                      const on = presetIds.has(p.id);
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          aria-pressed={on}
+                          onClick={() => togglePreset(p.id)}
+                          className={`inline-flex min-h-10 items-center gap-1.5 rounded-full border px-3.5 text-sm font-semibold transition-colors ${
+                            on ? 'border-accent bg-accent-soft text-accent' : 'border-line bg-surface hover:border-accent hover:text-accent'
+                          }`}
+                        >
+                          {on && <Check className="size-4" aria-hidden />}
+                          {p.name} <span className="font-normal opacity-75">· {p.groups.length}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+              )}
+              {!isAdmin && presetIds.size === 0 ? (
+                <p className="hint">Choose one or more lists above. All their groups get selected; untick any you want to skip.</p>
+              ) : (
+                <GroupPicker groups={pickerGroups} selected={validSelected} onChange={setSelected} />
+              )}
+            </>
           )}
         </section>
 
         {/* Send bar */}
-        <div className="sticky bottom-[calc(4.5rem+env(safe-area-inset-bottom))] z-10 md:bottom-4">
+        <div className="sticky bottom-[calc(1rem+env(safe-area-inset-bottom))] z-10">
           <div className="card flex flex-col gap-2 p-3 shadow-lg sm:flex-row sm:items-center sm:p-4">
             <div className="min-w-0 flex-1 text-sm" aria-live="polite">
               {blocker ? (
-                <span className="text-muted">{blocker}</span>
+                <span className={paused ? 'font-semibold text-bad' : 'text-muted'}>{blocker}</span>
               ) : (
                 <span>
                   Takes about <strong>{eta}</strong> for {plural(count, 'group')}.{' '}
-                  {count > remainingToday && (
-                    <span className="text-warn">
-                      Only {remainingToday} more allowed today; the rest go out tomorrow.
-                    </span>
-                  )}
+                  {count > remainingToday && <span className="text-warn">Only {remainingToday} more allowed today; the rest go out tomorrow.</span>}
                 </span>
               )}
             </div>
             <button type="submit" className="btn-primary min-h-13 text-lg sm:min-w-56" disabled={!canSend}>
               <SendIcon className="size-5" aria-hidden />
               {sending ? 'Saving…' : count ? `Send to ${plural(count, 'group')}` : 'Send'}
-              {count > 0 && !sending && <span className="font-normal opacity-85">· ~{eta}</span>}
+              {count > 0 && !sending && !blocker && <span className="font-normal opacity-85">· ~{eta}</span>}
             </button>
           </div>
         </div>
@@ -352,9 +400,9 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
         body={
           duplicate && (
             <>
-              This link was already used on <strong>{formatDateTime(duplicate.at)}</strong>
-              {duplicate.groups ? ` and reached ${plural(duplicate.groups, 'group')}` : ''}. Sending the same link twice can annoy members and increases the risk of the
-              number being blocked.{' '}
+              This link was already sent on <strong>{formatDateTime(duplicate.at)}</strong> by {duplicate.by}
+              {duplicate.groups ? ` and reached ${plural(duplicate.groups, 'group')}` : ''}. Sending the same link twice can annoy members and
+              increases the risk of the number being blocked.{' '}
               <button type="button" className="font-semibold text-accent underline" onClick={onShowHistory}>
                 See history
               </button>
@@ -365,89 +413,6 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
         onConfirm={() => void doSend(true)}
         onCancel={() => setDuplicate(null)}
       />
-
-      <SavePresetDialog
-        open={savePresetOpen}
-        groupIds={[...validSelected]}
-        presets={presets}
-        onClose={() => setSavePresetOpen(false)}
-        onSaved={(p) => {
-          setPresets(p);
-          setSavePresetOpen(false);
-        }}
-      />
     </div>
-  );
-}
-
-function SavePresetDialog({
-  open,
-  groupIds,
-  presets,
-  onClose,
-  onSaved,
-}: {
-  open: boolean;
-  groupIds: string[];
-  presets: Preset[];
-  onClose: () => void;
-  onSaved: (p: Preset[]) => void;
-}) {
-  const [name, setName] = useState('');
-  const [busy, setBusy] = useState(false);
-  const existing = presets.find((p) => p.name.toLowerCase() === name.trim().toLowerCase());
-
-  useEffect(() => {
-    if (open) setName('');
-  }, [open]);
-
-  const save = async (e: FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      const body = { name: name.trim(), groupIds };
-      const r = existing
-        ? await api<{ presets: Preset[] }>(`/api/presets/${existing.id}`, { method: 'PUT', body })
-        : await api<{ presets: Preset[] }>('/api/presets', { body });
-      onSaved(r.presets);
-      toast.success(`Saved “${body.name}” with ${plural(groupIds.length, 'group')}.`);
-    } catch (err) {
-      toast.error(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} title="Save group list" onClose={onClose}>
-      <form onSubmit={save}>
-        <label htmlFor="preset-name" className="label">
-          List name
-        </label>
-        <input
-          id="preset-name"
-          className="field"
-          placeholder="e.g. Sinhala groups"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          maxLength={60}
-          required
-          autoFocus
-        />
-        <p className="hint mt-2">
-          {existing
-            ? `A list called “${existing.name}” exists. Saving replaces its groups.`
-            : `Saves the ${plural(groupIds.length, 'selected group')} so you can pick them with one tap.`}
-        </p>
-        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <button type="button" className="btn-quiet" onClick={onClose}>
-            Cancel
-          </button>
-          <button type="submit" className="btn-primary" disabled={busy || !name.trim()}>
-            {existing ? 'Replace list' : 'Save list'}
-          </button>
-        </div>
-      </form>
-    </Dialog>
   );
 }

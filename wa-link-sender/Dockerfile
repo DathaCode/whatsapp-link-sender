@@ -51,6 +51,8 @@ COPY --chown=node:node package.json ./
 COPY --from=server --chown=node:node /app/node_modules ./node_modules
 COPY --from=server --chown=node:node /app/dist ./dist
 COPY --from=web --chown=node:node /web/dist ./public
+# Database migrations (SQL), applied automatically on start-up.
+COPY --chown=node:node drizzle ./drizzle
 
 # Volume mount points owned by the non-root user (new named volumes inherit this ownership).
 RUN mkdir -p /app/data /app/.wwebjs_auth /app/.wwebjs_cache \

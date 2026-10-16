@@ -17,9 +17,14 @@ db.pragma('synchronous = NORMAL'); // safe with WAL, much faster
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
 ```
-The file lives at `$DATA_DIR/app.db` (+ `-wal`, `-shm`), which is the `app_data` volume in Docker.
+The file lives at `$DATA_DIR/app.sqlite` (v2 used `app.db`) (+ `-wal`, `-shm`), which is the `app_data` volume in Docker.
 
-## Migrations
+## Drizzle (v3)
+- Schema in `src/db/schema.ts`; `npm run db:generate` writes SQL to `drizzle/`; `migrate()` runs on every start (and in the CLI).
+  Custom SQL (triggers) via `npx drizzle-kit generate --custom --name x`. Never edit an applied migration.
+- Keep the schema portable (integers/text, epoch ms, JSON as text) so a Postgres move = switch to pg-core + regenerate.
+
+## Migrations (v2, raw SQL, historical)
 - `MIGRATIONS` is an append-only array of SQL strings; `PRAGMA user_version` stores how many ran.
 - **Never edit an existing migration**. Add a new array entry (e.g. `ALTER TABLE ... ADD COLUMN ...`).
 - Each migration runs in a transaction together with the `user_version` bump.

@@ -2,14 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-import { createApp } from './app.js';
+import { SYSTEM } from './audit.js';
 import { parseConfig } from './config.js';
-import { Store } from './db.js';
-import { EventHub } from './events.js';
+import { AppError } from './errors.js';
+import { createApp } from './http/app.js';
 import { logger } from './logger.js';
-import { SendQueue } from './queue.js';
-import { Settings } from './settings.js';
-import { WhatsApp } from './whatsapp.js';
+import { Scheduler } from './scheduler.js';
+import { createServices } from './services.js';
 
 dotenv.config({ quiet: true });
 
@@ -25,40 +24,41 @@ const cfg = parsed.config;
 process.env.TZ = cfg.TZ;
 logger.level = cfg.LOG_LEVEL;
 const log = logger;
+if (process.env.ACCESS_KEY) log.warn('ACCESS_KEY is no longer used: sign-in now uses user accounts. You can remove it from .env.');
 
 // whatsapp-web.js occasionally rejects promises from its own page listeners.
-// Log them instead of letting Node kill the whole server (the original crash).
+// Log them instead of letting Node kill the whole server.
 process.on('unhandledRejection', (reason) => {
   log.error({ err: reason instanceof Error ? reason.stack : String(reason) }, 'unhandled promise rejection');
 });
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const publicDir = [path.join(here, '..', 'public'), path.join(here, '..', 'web', 'dist')].find((p) =>
-  fs.existsSync(path.join(p, 'index.html')),
-);
-if (!publicDir) log.warn('web page files not found; build them with "npm run build:web"');
+const publicDir =
+  [path.join(here, '..', 'public'), path.join(here, '..', 'web', 'dist')].find((p) => fs.existsSync(path.join(p, 'index.html'))) ??
+  path.join(here, '..', 'public');
 
-const store = new Store(cfg.DATA_DIR);
-const hub = new EventHub();
-const settings = new Settings(cfg, store);
-const wa = new WhatsApp(cfg, log.child({ mod: 'whatsapp' }));
-const queue = new SendQueue(cfg, store, wa, settings, hub, log.child({ mod: 'queue' }));
+const svc = createServices(cfg, log);
+const { audit, users, connections, queue, catalog, hub, backups } = svc;
 
-wa.on('status', (s) => hub.emit('whatsapp', s));
-// Right after linking, WhatsApp Web may not have synced chats yet, so retry a few times
-// until groups show up (or give up quietly; "Refresh groups" is always available).
+try {
+  await users.ensureInitialAdmin();
+} catch (e) {
+  console.error(`\n${e instanceof AppError ? e.message : String(e)}\n`);
+  process.exit(1);
+}
+catalog.seedTemplates();
+
+// Right after connecting, WhatsApp Web may not have synced chats yet: retry a few times.
 let groupLoadRun = 0;
-wa.on('ready', async () => {
+connections.on('active_ready', async () => {
   queue.kick();
   const run = ++groupLoadRun;
   for (const waitMs of [0, 10_000, 30_000, 90_000]) {
     if (waitMs) await new Promise((r) => setTimeout(r, waitMs));
-    if (run !== groupLoadRun || !wa.isReady()) return;
+    if (run !== groupLoadRun || !connections.isReady()) return;
     try {
-      const groups = await wa.listGroups();
-      store.replaceGroups(groups);
-      hub.emit('groups', groups);
-      log.info({ count: groups.length }, 'groups loaded');
+      const groups = await connections.refreshGroups(SYSTEM);
+      hub.admins('groups', groups);
       if (groups.length > 0) return;
     } catch (e) {
       log.warn({ err: e instanceof Error ? e.message : String(e) }, 'could not load groups yet');
@@ -66,24 +66,23 @@ wa.on('ready', async () => {
   }
 });
 
-const app = createApp({ cfg, store, wa, queue, settings, hub, log, publicDir: publicDir ?? path.join(here, '..', 'public') });
+const { app } = createApp({ cfg, log, publicDir, ...svc });
 const server = app.listen(cfg.PORT, () => {
-  log.info(
-    { port: cfg.PORT, tz: cfg.TZ, dataDir: cfg.DATA_DIR, safety: settings.get() },
-    `wa-link-sender listening on http://localhost:${cfg.PORT}`,
-  );
+  log.info({ port: cfg.PORT, tz: cfg.TZ, dataDir: cfg.DATA_DIR, db: svc.database.file }, `wa-link-sender listening on http://localhost:${cfg.PORT}`);
 });
 server.on('error', (e: NodeJS.ErrnoException) => {
-  if (e.code === 'EADDRINUSE') {
-    console.error(`\nPort ${cfg.PORT} is already in use. Set a different PORT in .env, then start again.\n`);
-  } else {
-    log.fatal({ err: e.message }, 'web server error');
-  }
+  if (e.code === 'EADDRINUSE') console.error(`\nPort ${cfg.PORT} is already in use. Set a different PORT in .env, then start again.\n`);
+  else log.fatal({ err: e.message }, 'web server error');
   process.exit(1);
 });
 
-wa.start();
+const version = JSON.parse(fs.readFileSync(path.join(here, '..', 'package.json'), 'utf8')).version as string;
+audit.record(SYSTEM, { action: 'system.started', details: { version, node: process.version, port: cfg.PORT, tz: cfg.TZ } });
+
+connections.boot();
 queue.start();
+const scheduler = new Scheduler(cfg, svc.db, backups, audit, log.child({ mod: 'scheduler' }));
+scheduler.start();
 
 let shuttingDown = false;
 async function shutdown(signal: string) {
@@ -96,11 +95,13 @@ async function shutdown(signal: string) {
   }, 25_000);
   force.unref();
 
+  scheduler.stop();
   server.close();
   hub.close();
   await queue.stop(); // let an in-flight message finish
-  await wa.stop(); // close Chromium cleanly so the session is saved
-  store.close();
+  await connections.stopAll(); // close Chromium cleanly so sessions are saved
+  audit.record(SYSTEM, { action: 'system.stopped', details: { signal } });
+  svc.sqlite.close();
   log.info('bye');
   process.exit(0);
 }

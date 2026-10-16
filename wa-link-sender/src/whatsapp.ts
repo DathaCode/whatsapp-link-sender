@@ -4,30 +4,26 @@ import path from 'node:path';
 import QRCode from 'qrcode';
 import wwebjs from 'whatsapp-web.js';
 import type { Config } from './config.js';
-import type { Group } from './db.js';
 import type { Logger } from './logger.js';
 
 const { Client, LocalAuth } = wwebjs;
 type WClient = InstanceType<typeof Client>;
 
-export type WaState = 'starting' | 'qr' | 'authenticating' | 'ready' | 'reconnecting' | 'stopped';
+export type WaRuntimeState = 'starting' | 'qr' | 'authenticating' | 'ready' | 'reconnecting' | 'stopped';
 
-export interface WaStatus {
-  state: WaState;
-  /** QR code as a data: URL while waiting to be linked */
-  qr: string | null;
-  account: { name: string; phone: string } | null;
-  lastError: string | null;
-  nextRetryAt: number | null;
-  since: number;
+export interface GroupInfo {
+  id: string;
+  name: string;
+  readOnly: boolean;
 }
 
 const CHROMIUM_LOCKS = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
 const INIT_TIMEOUT_MS = 3 * 60_000;
 const WATCHDOG_MS = 60_000;
 const MAX_BACKOFF_MS = 5 * 60_000;
+const BAN_STATES = new Set(['TOS_BLOCK', 'SMB_TOS_BLOCK']);
 
-function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   let t: NodeJS.Timeout;
   return Promise.race([
     p.finally(() => clearTimeout(t)),
@@ -37,33 +33,40 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   ]);
 }
 
-const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+export const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+export function sessionDirFor(authDir: string, clientId: string) {
+  return path.join(authDir, `session-${clientId}`);
+}
+
 /**
- * Owns the whatsapp-web.js client: start, QR, reconnect with backoff, watchdog,
- * logout and graceful shutdown. Every (re)start creates a brand-new Client, because
- * re-initializing a client whose browser died is what made the old version crash.
+ * One WhatsApp number = one whatsapp-web.js client with its own LocalAuth clientId
+ * (session folder). Handles QR, transient reconnects with backoff and a watchdog.
+ * It does NOT decide what to do after a logout/ban: it reports and stops, and the
+ * ConnectionManager decides.
+ *
+ * Events:
+ *   state (WaRuntimeState) · qr (dataUrl) · ready ({ phone, pushName })
+ *   disconnected (reason) · reconnect ({ attempt, delayMs, reason }) · start_failed (error)
+ *   logged_out ({ reason, suspectedBan })
  */
-export class WhatsApp extends EventEmitter {
+export class WaClient extends EventEmitter {
   private client: WClient | null = null;
   private generation = 0;
   private attempts = 0;
   private retryTimer: NodeJS.Timeout | null = null;
   private watchdog: NodeJS.Timeout | null = null;
   private watchdogFailures = 0;
-  private stopping = false;
+  private stopped = true;
   private restarting = false;
-  private status: WaStatus = {
-    state: 'starting',
-    qr: null,
-    account: null,
-    lastError: null,
-    nextRetryAt: null,
-    since: Date.now(),
-  };
+  state: WaRuntimeState = 'stopped';
+  qr: string | null = null;
+  lastError: string | null = null;
+  nextRetryAt: number | null = null;
 
   constructor(
+    readonly clientId: string,
     private cfg: Config,
     private log: Logger,
   ) {
@@ -71,22 +74,19 @@ export class WhatsApp extends EventEmitter {
   }
 
   get sessionDir() {
-    return path.join(this.cfg.WWEBJS_AUTH_DIR, 'session');
-  }
-
-  getStatus(): WaStatus {
-    return { ...this.status };
+    return sessionDirFor(this.cfg.WWEBJS_AUTH_DIR, this.clientId);
   }
 
   isReady() {
-    return this.status.state === 'ready' && this.client !== null;
+    return this.state === 'ready' && this.client !== null;
   }
 
-  private setStatus(patch: Partial<WaStatus>) {
-    const changedState = patch.state && patch.state !== this.status.state;
-    this.status = { ...this.status, ...patch, ...(changedState ? { since: Date.now() } : {}) };
-    if (changedState) this.log.info({ state: this.status.state }, 'whatsapp state');
-    this.emit('status', this.getStatus());
+  private setState(state: WaRuntimeState) {
+    if (state === this.state) return;
+    this.state = state;
+    if (state !== 'qr') this.qr = null;
+    this.log.info({ clientId: this.clientId, state }, 'whatsapp state');
+    this.emit('state', state);
   }
 
   /** Removes Chromium profile locks left behind when a container was killed. */
@@ -96,7 +96,7 @@ export class WhatsApp extends EventEmitter {
       try {
         fs.lstatSync(p); // lstat: these are often dangling symlinks
         fs.rmSync(p, { force: true });
-        this.log.info({ file: name }, 'removed stale Chromium lock');
+        this.log.info({ clientId: this.clientId, file: name }, 'removed stale Chromium lock');
       } catch {
         /* not present */
       }
@@ -104,19 +104,22 @@ export class WhatsApp extends EventEmitter {
   }
 
   start() {
-    this.stopping = false;
+    if (!this.stopped) return;
+    this.stopped = false;
+    this.attempts = 0;
     void this.launch();
   }
 
   private async launch() {
-    if (this.stopping) return;
+    if (this.stopped) return;
     const gen = ++this.generation;
     this.retryTimer = null;
+    this.nextRetryAt = null;
     this.removeStaleLocks();
-    this.setStatus({ state: this.attempts === 0 ? 'starting' : 'reconnecting', qr: null, nextRetryAt: null });
+    this.setState(this.attempts === 0 ? 'starting' : 'reconnecting');
 
     const client = new Client({
-      authStrategy: new LocalAuth({ dataPath: this.cfg.WWEBJS_AUTH_DIR }),
+      authStrategy: new LocalAuth({ clientId: this.clientId, dataPath: this.cfg.WWEBJS_AUTH_DIR }),
       webVersionCache: { type: 'local', path: this.cfg.WWEBJS_CACHE_DIR },
       puppeteer: {
         headless: this.cfg.HEADLESS,
@@ -133,44 +136,50 @@ export class WhatsApp extends EventEmitter {
       },
     });
     this.client = client;
-    const current = () => gen === this.generation && !this.stopping;
+    const current = () => gen === this.generation && !this.stopped;
 
     client.on('qr', async (qr: string) => {
       if (!current()) return;
       this.attempts = 0;
       const dataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 320 });
-      if (current()) this.setStatus({ state: 'qr', qr: dataUrl, lastError: null });
+      if (!current()) return;
+      this.qr = dataUrl;
+      this.setState('qr');
+      this.emit('qr', dataUrl);
     });
     client.on('authenticated', () => {
-      if (current()) this.setStatus({ state: 'authenticating', qr: null });
+      if (current()) this.setState('authenticating');
     });
     client.on('auth_failure', (msg: string) => {
       if (!current()) return;
-      this.log.error({ msg }, 'whatsapp auth failure, clearing saved session');
-      void this.restart('Saved login was rejected by WhatsApp. Scan the QR code again.', { wipeSession: true });
+      this.log.error({ clientId: this.clientId, msg }, 'whatsapp auth failure');
+      void this.handleLoggedOut('WhatsApp rejected the saved login', false);
     });
     client.on('ready', () => {
       if (!current()) return;
       this.attempts = 0;
       this.watchdogFailures = 0;
+      this.lastError = null;
       const info = client.info;
-      this.setStatus({
-        state: 'ready',
-        qr: null,
-        lastError: null,
-        account: info ? { name: info.pushname ?? '', phone: info.wid?.user ?? '' } : null,
-      });
+      this.setState('ready');
       this.startWatchdog(gen);
-      this.emit('ready');
+      this.emit('ready', { phone: info?.wid?.user ?? null, pushName: info?.pushname ?? null });
+    });
+    client.on('change_state', (state: string) => {
+      if (!current()) return;
+      if (BAN_STATES.has(state)) void this.handleLoggedOut(`WhatsApp reported ${state}`, true);
     });
     client.on('disconnected', (reason: string) => {
       if (!current()) return;
-      this.log.warn({ reason }, 'whatsapp disconnected');
-      const loggedOut = reason === 'LOGOUT' || reason === 'UNPAIRED' || reason === 'UNPAIRED_IDLE';
-      void this.restart(
-        loggedOut ? 'This number was unlinked from the phone. Scan the QR code to link it again.' : `Disconnected (${reason})`,
-        { wipeSession: loggedOut, immediate: loggedOut },
-      );
+      this.log.warn({ clientId: this.clientId, reason }, 'whatsapp disconnected');
+      if (reason === 'LOGOUT' || reason === 'UNPAIRED' || reason === 'UNPAIRED_IDLE') {
+        void this.handleLoggedOut(`WhatsApp logged this number out (${reason})`, false);
+      } else if (BAN_STATES.has(reason)) {
+        void this.handleLoggedOut(`WhatsApp reported ${reason}`, true);
+      } else {
+        this.emit('disconnected', reason);
+        void this.restart(`Disconnected (${reason})`);
+      }
     });
 
     try {
@@ -181,7 +190,8 @@ export class WhatsApp extends EventEmitter {
       });
     } catch (e) {
       if (!current()) return;
-      this.log.error({ err: errText(e) }, 'whatsapp failed to start');
+      this.log.error({ clientId: this.clientId, err: errText(e) }, 'whatsapp failed to start');
+      this.emit('start_failed', errText(e));
       void this.restart(`Could not start WhatsApp: ${errText(e)}`);
     }
   }
@@ -189,20 +199,27 @@ export class WhatsApp extends EventEmitter {
   private startWatchdog(gen: number) {
     this.stopWatchdog();
     this.watchdog = setInterval(async () => {
-      if (gen !== this.generation || !this.client || this.status.state !== 'ready') return;
+      if (gen !== this.generation || !this.client || this.state !== 'ready') return;
       try {
         const state = await withTimeout(this.client.getState(), 20_000, 'state check');
         if (state === 'CONNECTED') {
           this.watchdogFailures = 0;
           return;
         }
+        if (BAN_STATES.has(String(state))) {
+          void this.handleLoggedOut(`WhatsApp reported ${state}`, true);
+          return;
+        }
         this.watchdogFailures++;
-        this.log.warn({ state, failures: this.watchdogFailures }, 'watchdog: not connected');
+        this.log.warn({ clientId: this.clientId, state, failures: this.watchdogFailures }, 'watchdog: not connected');
       } catch (e) {
         this.watchdogFailures++;
-        this.log.warn({ err: errText(e), failures: this.watchdogFailures }, 'watchdog: state check failed');
+        this.log.warn({ clientId: this.clientId, err: errText(e), failures: this.watchdogFailures }, 'watchdog: state check failed');
       }
-      if (this.watchdogFailures >= 3) void this.restart('Connection stopped responding');
+      if (this.watchdogFailures >= 3) {
+        this.emit('disconnected', 'watchdog');
+        void this.restart('Connection stopped responding');
+      }
     }, WATCHDOG_MS);
     this.watchdog.unref();
   }
@@ -221,7 +238,7 @@ export class WhatsApp extends EventEmitter {
     try {
       await withTimeout(client.destroy(), 20_000, 'browser shutdown');
     } catch (e) {
-      this.log.warn({ err: errText(e) }, 'browser did not close cleanly; killing it');
+      this.log.warn({ clientId: this.clientId, err: errText(e) }, 'browser did not close cleanly; killing it');
       try {
         client.pupBrowser?.process()?.kill('SIGKILL');
       } catch {
@@ -230,52 +247,55 @@ export class WhatsApp extends EventEmitter {
     }
   }
 
-  private wipeSession() {
-    try {
-      fs.rmSync(this.sessionDir, { recursive: true, force: true, maxRetries: 3 });
-      this.log.info('saved WhatsApp session removed');
-    } catch (e) {
-      this.log.error({ err: errText(e) }, 'could not remove saved session');
-    }
-  }
-
-  /** Tears the client down and starts a new one after an exponential backoff. */
-  private async restart(reason: string, opts: { wipeSession?: boolean; immediate?: boolean } = {}) {
-    if (this.stopping || this.restarting) return;
+  /** Transient problem: tear down and start a new client after an exponential backoff. */
+  private async restart(reason: string) {
+    if (this.stopped || this.restarting) return;
     this.restarting = true;
-    this.generation++; // ignore any late events from the old client
+    this.generation++; // ignore late events from the old client
     try {
-      this.setStatus({ state: 'reconnecting', qr: null, lastError: reason });
+      this.lastError = reason;
+      this.setState('reconnecting');
       await this.destroyClient();
-      if (opts.wipeSession) this.wipeSession();
       this.attempts++;
-      const delay = opts.immediate
-        ? 1000
-        : Math.min(MAX_BACKOFF_MS, 5000 * 2 ** (this.attempts - 1)) + Math.floor(Math.random() * 2000);
-      this.log.info({ attempt: this.attempts, delayMs: delay, reason }, 'whatsapp restart scheduled');
-      this.setStatus({ nextRetryAt: Date.now() + delay });
-      if (!this.stopping) this.retryTimer = setTimeout(() => void this.launch(), delay);
+      const delayMs = Math.min(MAX_BACKOFF_MS, 5000 * 2 ** (this.attempts - 1)) + Math.floor(Math.random() * 2000);
+      this.nextRetryAt = Date.now() + delayMs;
+      this.log.info({ clientId: this.clientId, attempt: this.attempts, delayMs, reason }, 'whatsapp restart scheduled');
+      this.emit('reconnect', { attempt: this.attempts, delayMs, reason });
+      if (!this.stopped) this.retryTimer = setTimeout(() => void this.launch(), delayMs);
     } finally {
       this.restarting = false;
     }
   }
 
-  /** "Unlink WhatsApp": log out on WhatsApp's side, wipe the session and show a fresh QR. */
+  /** Logged out or blocked: stop for good and let the manager decide. */
+  private async handleLoggedOut(reason: string, suspectedBan: boolean) {
+    if (this.stopped) return;
+    this.lastError = reason;
+    this.emit('logged_out', { reason, suspectedBan });
+    await this.stop();
+  }
+
+  /** Logs out on WhatsApp's side (removes the linked device on the phone), then stops. */
   async logout() {
     const client = this.client;
     this.generation++;
-    if (client && this.status.state === 'ready') {
+    if (client && this.state === 'ready') {
       try {
         await withTimeout(client.logout(), 30_000, 'logout');
       } catch (e) {
-        this.log.warn({ err: errText(e) }, 'logout call failed; wiping session locally');
+        this.log.warn({ clientId: this.clientId, err: errText(e) }, 'logout call failed');
       }
     }
-    await this.destroyClient();
-    this.wipeSession();
-    this.attempts = 0;
-    this.setStatus({ account: null, lastError: null });
-    if (!this.stopping) void this.launch();
+    await this.stop();
+  }
+
+  wipeSession() {
+    try {
+      fs.rmSync(this.sessionDir, { recursive: true, force: true, maxRetries: 3 });
+      this.log.info({ clientId: this.clientId }, 'saved WhatsApp session removed');
+    } catch (e) {
+      this.log.error({ clientId: this.clientId, err: errText(e) }, 'could not remove saved session');
+    }
   }
 
   /**
@@ -283,11 +303,10 @@ export class WhatsApp extends EventEmitter {
    * We avoid client.getChats(): in whatsapp-web.js 1.34.7 it also loads every chat's last
    * message, which fails inside WhatsApp Web (IndexedDB "No key or key range specified").
    * Membership/admin checks use WhatsApp's own iAmMember/iAmAdmin, because participants
-   * are now listed by LID, not phone number.
+   * are listed by LID, not phone number.
    */
-  async listGroups(): Promise<Group[]> {
-    const client = this.requireClient();
-    const page = client.pupPage;
+  async listGroups(): Promise<GroupInfo[]> {
+    const page = this.requireClient().pupPage;
     if (!page) throw new NotConnectedError();
     const groups = await withTimeout(
       page.evaluate(() => {
@@ -309,11 +328,10 @@ export class WhatsApp extends EventEmitter {
             };
             const member = call('iAmMember', true);
             const admin = call('iAmAdmin', false) || call('iAmSuperAdmin', false);
-            const adminsOnly = Boolean(gm.announce) && !admin;
             return {
               id: String(c.id._serialized),
               name: String(c.formattedTitle || c.name || gm.subject || c.id.user),
-              readOnly: !member || adminsOnly || c.isReadOnly === true,
+              readOnly: !member || (Boolean(gm.announce) && !admin) || c.isReadOnly === true,
             };
           });
       }),
@@ -341,8 +359,7 @@ export class WhatsApp extends EventEmitter {
       await sleep(1500 + Math.random() * 2500);
       await withTimeout(Promise.resolve(chatstate('stop')), 10_000, 'Typing indicator');
     } catch (e) {
-      // Cosmetic only; a missing chat will fail properly in sendMessage.
-      this.log.debug({ err: errText(e) }, 'typing indicator skipped');
+      this.log.debug({ clientId: this.clientId, err: errText(e) }, 'typing indicator skipped');
     }
     const sent = await withTimeout(
       // sendSeen:false avoids a known breakage in recent WhatsApp Web builds.
@@ -354,16 +371,18 @@ export class WhatsApp extends EventEmitter {
   }
 
   private requireClient(): WClient {
-    if (!this.client || this.status.state !== 'ready') throw new NotConnectedError();
+    if (!this.client || this.state !== 'ready') throw new NotConnectedError();
     return this.client;
   }
 
   async stop() {
-    this.stopping = true;
+    this.stopped = true;
     this.generation++;
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.nextRetryAt = null;
     await this.destroyClient();
-    this.setStatus({ state: 'stopped' });
+    this.setState('stopped');
   }
 }
 

@@ -4,149 +4,94 @@ Paste a **Facebook / TikTok / YouTube** post link into a web page and send it to
 your own WhatsApp number is **already a member of**. Runs 24/7 in Docker, on Windows (Docker Desktop)
 or a Linux server.
 
-- Live progress, history with **Retry failed groups**, saved group lists and message templates
-- Safety rules enforced on the server: random pause between groups (default 15–40 s), daily limit,
-  sending hours, duplicate-link warning, one message at a time
-- Pending sends are stored in SQLite and **survive restarts**
-- The WhatsApp login is stored in a Docker volume, so **restarts and rebuilds don't need a new QR scan**
+- **User accounts with two roles.** Admins manage everything. Users can only send to the presets (group lists) they were given and see their own history.
+- **Managed WhatsApp numbers.** Link numbers by QR code, choose the one active number, and see status, possible bans and per-number stats.
+- **Complete audit log.** Every sign-in, change, refused request and per-group send result is recorded and append-only, with a searchable Logs page and CSV export.
+- **Safety rules enforced on the server.** Random pause between groups (default 15–40 s), a daily limit per number, sending hours, a duplicate-link warning, and one message at a time.
+- Pending sends survive restarts. Nightly database backups are made automatically.
 
 It uses [whatsapp-web.js](https://wwebjs.dev) (a "linked device", like WhatsApp Web). This is not an
-official WhatsApp API. Use a dedicated number and keep the safety limits on.
+official WhatsApp API. Use dedicated numbers and keep the safety limits on.
 
 ---
 
 ## Contents
 
-1. [Windows (Docker Desktop)](#1-windows-docker-desktop)
-2. [Linux server (Ubuntu)](#2-linux-server-ubuntu)
+1. [First run: Windows (Docker Desktop)](#1-first-run-windows-docker-desktop)
+2. [First run: Linux server (Ubuntu)](#2-first-run-linux-server-ubuntu)
 3. [Settings (.env)](#3-settings-env)
-4. [Using the app](#4-using-the-app)
-5. [Troubleshooting](#5-troubleshooting)
-6. [Development without Docker](#6-development-without-docker)
-7. [How it works](#7-how-it-works)
+4. [Users and roles](#4-users-and-roles)
+5. [Adding or replacing a WhatsApp number](#5-adding-or-replacing-a-whatsapp-number)
+6. [Reading and exporting logs](#6-reading-and-exporting-logs)
+7. [Backup and restore](#7-backup-and-restore)
+8. [Forgotten admin password](#8-forgotten-admin-password)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Development and tests](#10-development-and-tests)
+11. [How it works](#11-how-it-works)
 
 ---
 
-## 1. Windows (Docker Desktop)
+## 1. First run: Windows (Docker Desktop)
 
-Run these in **PowerShell** in this folder (`wa-link-sender`).
-
-**Check Docker Desktop is installed and running** (install from <https://www.docker.com/products/docker-desktop/>, WSL 2 backend):
-
-```powershell
-docker version
-docker compose version
-```
-
-Both must print a *Server* / version section. If `docker version` shows an error about the engine, start Docker Desktop and wait until it says *Engine running*.
-
-**Create your settings file** (first time only):
+Run in **PowerShell** in this folder (`wa-link-sender`). Docker Desktop must be running (`docker version` shows a *Server* section).
 
 ```powershell
 Copy-Item .env.example .env
-notepad .env        # set ACCESS_KEY (12+ characters); PORT is 3100 by default
+notepad .env
 ```
 
-Generate a strong key: `-join ((48..57)+(65..90)+(97..122) | Get-Random -Count 32 | % {[char]$_})`
+Set at least:
 
-**Build and start** (runs in the background, restarts with Docker Desktop):
+| Variable | What to put |
+|---|---|
+| `SESSION_SECRET` | a long random value: `[Convert]::ToBase64String((1..48 \| % {Get-Random -Max 256}))` |
+| `INITIAL_ADMIN_USERNAME` | e.g. `admin` |
+| `INITIAL_ADMIN_PASSWORD` | 10+ characters (temporary; you change it at first sign-in) |
 
 ```powershell
 docker compose up -d --build
-docker compose ps          # STATUS should become "Up ... (healthy)" within a minute
+docker compose ps            # wait for "Up ... (healthy)"
 ```
 
-Open **<http://localhost:3100>**, sign in with your `ACCESS_KEY`, then go to **Connection** and scan the QR code with the sending phone.
+Open **<http://localhost:3100>** and sign in with the initial admin, then choose your own password. Then:
+
+1. Open **Connections**, choose **Add number** and scan the QR code with the sending phone ([details](#5-adding-or-replacing-a-whatsapp-number)).
+2. Open **Groups & Presets**: the groups load automatically. Create presets such as "Sinhala groups".
+3. Open **Users**: create accounts for your team and tick the presets each person may use.
 
 | Task | Command |
 |---|---|
-| View logs (live) | `docker compose logs -f app` |
-| Stop | `docker compose down` (keeps the WhatsApp login and history) |
-| Start again | `docker compose up -d` |
-| Restart | `docker compose restart app` |
-| Update after changing code / pulling | `docker compose up -d --build` |
-| Update the WhatsApp library | change `whatsapp-web.js` in `package.json`, run `npm install`, then `docker compose up -d --build` |
-
-> To keep it running after a reboot: Docker Desktop → Settings → General → **Start Docker Desktop when you sign in**. The container itself has `restart: unless-stopped`.
+| Logs (live) | `docker compose logs -f app` |
+| Stop / start | `docker compose stop` / `docker compose start` |
+| Update after pulling new code | `docker compose up -d --build` |
 
 ---
 
-## 2. Linux server (Ubuntu)
-
-**Install Docker Engine + Compose plugin** (official script):
+## 2. First run: Linux server (Ubuntu)
 
 ```bash
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER   # then log out and back in
-docker compose version
-```
-
-**Get the code and configure:**
-
-```bash
+curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker $USER   # log out/in afterwards
 git clone https://github.com/DathaCode/whatsapp-link-sender.git
 cd whatsapp-link-sender/wa-link-sender
-# (private repo? use a GitHub deploy key or a personal access token)
 cp .env.example .env
-nano .env                       # set ACCESS_KEY, check TZ / limits
-```
-
-**Run:**
-
-```bash
+sed -i "s|^SESSION_SECRET=.*|SESSION_SECRET=$(openssl rand -base64 48 | tr -d '\n')|" .env
+nano .env                       # set INITIAL_ADMIN_USERNAME / INITIAL_ADMIN_PASSWORD, check TZ
+chmod 600 .env
 docker compose up -d --build
 docker compose ps
-docker compose logs -f app
 ```
 
-The app listens on `127.0.0.1:3100` only, so it is **not** reachable from the internet by default.
-To link the phone from your PC, use an SSH tunnel:
+The app listens on `127.0.0.1:3100` only. Reach it through an SSH tunnel from your PC
+(`ssh -L 3101:127.0.0.1:3100 user@server`, then open <http://localhost:3101>), or publish it with HTTPS:
 
 ```bash
-ssh -L 3100:127.0.0.1:3100 user@your-server
-# then open http://localhost:3100 on your PC
-```
-
-### Optional: HTTPS on a domain (Caddy)
-
-1. Point a DNS **A record** (e.g. `links.example.com`) at the server's IP.
-2. Open ports 80 and 443 (`sudo ufw allow 80,443/tcp && sudo ufw allow 443/udp` if you use ufw).
-3. Add to `.env`: `DOMAIN=links.example.com`
-4. Start with the proxy profile:
-
-```bash
+echo 'DOMAIN=links.example.com' >> .env      # DNS A record must point to the server
+sudo ufw allow 80/tcp && sudo ufw allow 443/tcp && sudo ufw allow 443/udp
 docker compose --profile proxy up -d
 ```
 
-Caddy gets and renews a free Let's Encrypt certificate automatically. The app is then at
-`https://links.example.com`, and sign-in cookies are marked Secure. Stop the proxy with `docker compose --profile proxy down`.
-Use a long `ACCESS_KEY` before exposing the app. Sign-in attempts are limited to 10 wrong tries per 15 minutes.
-
-### Backups
-
-All state lives in three named volumes:
-
-| Volume | Contents |
-|---|---|
-| `wa-link-sender_wa_auth` | WhatsApp login (treat it like a password) |
-| `wa-link-sender_app_data` | SQLite: history, queue, templates, group lists, settings |
-| `wa-link-sender_wa_cache` | cached WhatsApp Web version (no need to back up) |
-
-```bash
-# Back up (stop briefly so the files are consistent)
-docker compose stop app
-docker run --rm -v wa-link-sender_app_data:/v -v "$PWD":/b alpine tar czf /b/app_data-$(date +%F).tgz -C /v .
-docker run --rm -v wa-link-sender_wa_auth:/v  -v "$PWD":/b alpine tar czf /b/wa_auth-$(date +%F).tgz  -C /v .
-docker compose start app
-
-# Restore (into a fresh install, before first start)
-docker compose create app
-docker run --rm -v wa-link-sender_app_data:/v -v "$PWD":/b alpine sh -c "tar xzf /b/app_data-YYYY-MM-DD.tgz -C /v && chown -R 1000:1000 /v"
-docker run --rm -v wa-link-sender_wa_auth:/v  -v "$PWD":/b alpine sh -c "tar xzf /b/wa_auth-YYYY-MM-DD.tgz -C /v && chown -R 1000:1000 /v"
-docker compose up -d
-```
-
-On Windows PowerShell use `${PWD}` instead of `"$PWD"` and type the date by hand.
+Caddy gets a free certificate automatically. Behind it, cookies are marked *Secure* and the audit log
+records the real client IP (`TRUST_PROXY` trusts the private Docker network by default).
 
 ---
 
@@ -154,117 +99,192 @@ On Windows PowerShell use `${PWD}` instead of `"$PWD"` and type the date by hand
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT` | `3100` | Web port (host and container) |
-| `ACCESS_KEY` | *(required)* | Sign-in password for your team, 12+ characters |
-| `TZ` | `Asia/Colombo` | Time zone for sending hours and the daily limit |
+| `PORT` | `3100` | Web port |
+| `TZ` | `Asia/Colombo` | Time zone for sending hours, daily limits, nightly jobs and how times are shown |
+| `INITIAL_ADMIN_USERNAME` / `INITIAL_ADMIN_PASSWORD` | — | Creates the first admin **only when no users exist**. They must change the password at first sign-in |
+| `SESSION_SECRET` | *(required)* | 32+ random characters; signs the anti-CSRF tokens |
+| `SESSION_IDLE_HOURS` | `8` | Sign out after this long without activity |
+| `SESSION_MAX_DAYS` | `7` | Sign out after this long in any case |
+| `LOGIN_MAX_ATTEMPTS` / `LOGIN_LOCK_MINUTES` | `5` / `15` | Lock an account (or attempted username) after this many wrong passwords |
+| `TRUST_PROXY` | `loopback, uniquelocal` | Which proxies may report the client IP: `false`, `true`, a hop count, or address list |
+| `AUDIT_RETENTION_DAYS` | `365` | Audit entries older than this are removed nightly (minimum 30) |
+| `BACKUP_KEEP` | `14` | Nightly database backups to keep |
 | `MIN_DELAY_SECONDS` / `MAX_DELAY_SECONDS` | `15` / `40` | Random pause between groups (minimum 5) |
-| `DAILY_MESSAGE_CAP` | `150` | Max messages per day (1 group = 1 message, failures count too) |
-| `SEND_WINDOW_START` / `SEND_WINDOW_END` | `08:00` / `21:00` | Sending hours. Outside them, sends wait. May cross midnight |
+| `DAILY_MESSAGE_CAP` | `150` | Max messages per WhatsApp number per day |
+| `SEND_WINDOW_START` / `SEND_WINDOW_END` | `08:00` / `21:00` | Sending hours; outside them sends wait |
 | `DOMAIN` | — | Only for the `proxy` profile |
-| `LOG_LEVEL` | `info` | `debug` for more detail |
 
-The safety values in `.env` are **defaults**. The **Settings** page can change them (stored in the
-database) and has a *Use .env defaults* button. Every value is checked at start-up, and the app tells
-you exactly what is wrong instead of starting with bad settings.
-
-After editing `.env`: `docker compose up -d` (recreates the container with the new values).
+The safety values in `.env` are defaults. Admins can change them on **Settings**, and every change is
+audit-logged with before and after values. After editing `.env`, run `docker compose up -d`.
 
 ---
 
-## 4. Using the app
+## 4. Users and roles
 
-- **Connection**: status badge, QR code with steps, *Refresh groups*, *Unlink WhatsApp*.
-- **Send**:
-  1. Paste a link. The platform is detected and tracking parameters (`si`, `utm_*`, `fbclid`…) are removed.
-  2. Pick a template, or *Mix it up* (rotates templates).
-  3. Choose groups or a saved list. The button shows the estimated time.
-  4. Progress updates live. You can close the page and sending continues.
-- **History**: search, copy link, open it, see per-group results, *Retry failed groups*.
-- **Settings**: today's usage, pauses, daily limit, sending hours, templates (`{url}` = the link), saved group lists.
+| | ADMIN | USER |
+|---|:-:|:-:|
+| Send | any group on the active number | only groups in presets assigned to them |
+| History | everyone's | their own |
+| Dashboard, Users, Connections, Groups & Presets, Settings, Logs | ✓ | — |
 
-**Safety tips:** use a separate number that has been used normally for a while. Only send to groups
-where members expect your posts. Don't resend the same link. Keep pauses at 15 s or more.
+These rules are enforced by the server on every request. A user who tries an admin address gets *403*,
+and the attempt is recorded in the audit log.
+
+- **Create a user:** Users → *New user*. A temporary password is shown **once**. The user sets their own at first sign-in.
+- **Reset a password:** creates a new temporary password and signs the user out everywhere.
+- **Disable:** the user is signed out and cannot sign in. Users are never deleted, so their history stays attributed.
+- **Last admin protection:** the last active admin cannot be disabled or made a USER.
+- **Passwords:** at least 10 characters, cannot reuse the current one, stored with argon2id.
+- **Lockout:** 5 wrong passwords lock that username for 15 minutes. Messages never reveal whether a username exists.
 
 ---
 
-## 5. Troubleshooting
+## 5. Adding or replacing a WhatsApp number
 
-**QR code doesn't appear**
-- Wait up to a minute after start-up. Check `docker compose logs -f app` for `"state":"qr"`.
-- If it says *Reconnecting* repeatedly, read `lastError` in the log. A whatsapp-web.js update often fixes start-up failures after WhatsApp changes its web app. Change `whatsapp-web.js` in `package.json` to the latest version, run `npm install`, then `docker compose up -d --build`.
+Only **one number is active** at a time, and it sends everything. The app never switches numbers by
+itself. If the active number disconnects, is logged out or may be banned, **sending pauses**. Admins
+see a red banner, and users see "Sending is paused, please contact your admin."
 
-**Chromium crashes / "Target closed" / "Protocol error"**
-- The app restarts the browser itself, waiting longer each time (5 s up to 5 min). A watchdog also restarts it if the connection stops responding.
-- Make sure `shm_size: 1gb` is still in `docker-compose.yml`, and that the machine has at least 1 GB of free RAM.
-- "Browser is already running" errors come from leftover `SingletonLock` files. These are removed automatically at every start.
+**Add a number:**
+1. Connections → **Add number** → give it a name → **Show QR code**.
+2. On the phone: WhatsApp → **Linked devices** → **Link a device** → scan. The code expires after 5 minutes (use *Show QR again*).
+3. The first number becomes active automatically. Later numbers go to **Standby**: their login is saved, but they don't run.
 
-**Port already in use**
-- Change `PORT` in `.env` (e.g. `PORT=3200`), then `docker compose up -d`. Find who uses a port: Windows `netstat -ano | findstr :3100`, Linux `sudo ss -ltnp | grep 3100`.
+**Replace the active number** (for example, it was banned):
+1. Add the new number as above (it goes to Standby).
+2. Make sure the new number is a member of your groups.
+3. Choose **Make active** on it. The old one goes to Standby.
+4. Open **Groups & Presets** and choose **Refresh groups**. Presets show a warning for groups the new number isn't in.
 
-**Session lost (QR shown again after a restart)**
-- The phone unlinked the device, or WhatsApp logged it out (phone offline for ~14 days, or removed under *Linked devices*). Scan again.
-- Make sure you never ran `docker compose down -v`. The `-v` deletes the volumes, including the login.
+**Statuses:** *Connected* · *Standby* · *Reconnecting…* (temporary; it retries by itself) · *Logged out*
+(unlinked from the phone, or WhatsApp ended the session) · *Possibly banned* (WhatsApp reported a block) ·
+*Removed* (session deleted; history kept).
 
-**Reset the WhatsApp session completely**
+**Re-link** shows a fresh QR code for the same entry. **Remove** signs the number out of WhatsApp,
+deletes its saved login and keeps it in the list as *Removed*.
+
+Each number keeps its login in its own folder (`.wwebjs_auth/session-<id>`) inside the `wa_auth` volume.
+
+---
+
+## 6. Reading and exporting logs
+
+**Logs** (admins) shows the audit trail, newest first. Failed entries have a red edge and denied entries an amber one.
+
+- Filter by date range, user, category (sign-in, blocked requests, users, numbers, groups, presets, settings, sending, system), outcome, WhatsApp number, or free text such as an IP, URL or group name.
+- Click a row to see everything: UTC time, user and role, IP, browser, session id, target, reason, and the JSON details (for changes, before and after values; never passwords).
+- **Export CSV** downloads the rows that match the current filters. The export itself is logged.
+- Rows cannot be edited or deleted. The database refuses it. Entries older than `AUDIT_RETENTION_DAYS` are pruned nightly, and that is logged too.
+
+Application logs (`docker compose logs app`) are JSON lines. Each audit event is mirrored there, but the
+audit log in the database is the source of truth.
+
+---
+
+## 7. Backup and restore
+
+**Automatic:** every night at 02:30 (`TZ`) the database is copied with `VACUUM INTO` to
+`data/backups/` inside the `app_data` volume. The newest `BACKUP_KEEP` copies are kept.
+
+**From the app:** Settings → Backups → *Back up now* and *Download*. Downloads are audit-logged.
+Store downloads safely, because they include password hashes and the audit log.
+
+**Restore the database** (users, presets, history, audit log, settings):
 
 ```powershell
-# Easiest: Connection tab → "Unlink WhatsApp", then scan the new QR.
-# Or by hand (deletes only the login; history stays):
 docker compose stop app
-docker volume rm wa-link-sender_wa_auth
-docker compose up -d
+docker compose cp .\app-20261016-023000.sqlite app:/app/data/restore.sqlite
+docker compose run --rm --entrypoint sh app -c "rm -f /app/data/app.sqlite-wal /app/data/app.sqlite-shm && mv /app/data/restore.sqlite /app/data/app.sqlite"
+docker compose start app
 ```
 
-**A send is "Paused"**: it is outside sending hours, the daily limit is reached, or WhatsApp is
-disconnected. It continues by itself and nothing is lost.
+**WhatsApp logins** are in the separate `wa_auth` volume and are not inside the database backup. To
+move them to another server, see the volume commands below. Or simply re-link the numbers.
 
-**A group shows "Can't post here"**: only admins can post there, or the number left the group.
+```bash
+# Whole-volume backup (Linux; stop the app first for a consistent copy)
+docker compose stop app
+docker run --rm -v wa-link-sender_app_data:/v -v "$PWD":/b alpine tar czf /b/app_data.tgz -C /v .
+docker run --rm -v wa-link-sender_wa_auth:/v  -v "$PWD":/b alpine tar czf /b/wa_auth.tgz  -C /v .
+docker compose start app
+```
 
-**Running without Docker on Windows** and you see `Execution context was destroyed` right after start:
-the project folder path is too long for Chromium's profile files (Windows 260-character limit).
-Move the folder to a short path such as `C:\apps\wa-link-sender`. Docker is not affected.
+Never run `docker compose down -v`: `-v` deletes the volumes.
 
 ---
 
-## 6. Development without Docker
+## 8. Forgotten admin password
+
+```bash
+docker compose exec app node dist/cli.js reset-admin            # INITIAL_ADMIN_USERNAME, or the oldest admin
+docker compose exec app node dist/cli.js reset-admin someone    # a specific account
+```
+
+It re-enables and unlocks the account, makes sure it is an admin, prints a **temporary password** and
+signs out its sessions. Sign in with that password, and you'll be asked to choose a new one. The reset is audit-logged.
+
+---
+
+## 9. Troubleshooting
+
+**"cannot start because of these settings problems"**: the message lists each bad value. Fix `.env`, then `docker compose up -d`.
+
+**"No users exist yet. Set INITIAL_ADMIN_USERNAME…"**: first start without an initial admin. Add both values to `.env`.
+
+**QR doesn't appear / keeps reconnecting**: check `docker compose logs -f app` for `connection.*` entries and their reasons. WhatsApp Web changes often. Updating `whatsapp-web.js` in `package.json`, then `npm install` and `docker compose up -d --build`, usually fixes start-up failures.
+
+**Chromium crashes**: the app restarts it with a growing delay and a watchdog. Keep `shm_size: 1gb` and give the server at least 2 GB RAM. Stale `SingletonLock` files are removed at start.
+
+**"Your page is out of date. Reload it"**: the anti-CSRF token didn't match (for example, after `SESSION_SECRET` changed). Reload the page.
+
+**Everyone shows the same IP in the logs**: with plain Docker port mapping (Docker Desktop), Docker hides the client address. Behind the Caddy proxy the real IP is recorded.
+
+**Port already in use**: change `PORT` in `.env`, then `docker compose up -d`.
+
+**Upgrading from the single-access-key version**: this version uses a new database file (`app.sqlite`) and new per-number session folders. Old history isn't imported. `ACCESS_KEY` is no longer used. Re-link your number on the Connections page, and on the phone remove the old linked device under *Linked devices*.
+
+---
+
+## 10. Development and tests
 
 Needs Node.js 22+.
 
 ```powershell
-npm install
-npm --prefix web install
-npm run build:web          # build the page once (served by the server)
-npm run dev                # server with auto-reload on http://localhost:3100
-npm run dev:web            # optional: Vite dev server on :5173 with hot reload (proxies /api)
-npm test                   # unit tests
+npm install; npm --prefix web install
+npm run build:web
+npm run dev                  # server on :3100 (uses .env)
+npm run dev:web              # optional: Vite on :5173 with hot reload
+npm test                     # 70 tests: roles on every route, lockout, audit coverage, presets, last admin, queue
 npm run typecheck
+npm run db:generate          # after editing src/db/schema.ts: creates a new migration in drizzle/
 ```
-
-Without Docker, the session is stored in `./.wwebjs_auth` and the database in `./data`. Set `HEADLESS=false` to watch the browser.
 
 ---
 
-## 7. How it works
+## 11. How it works
 
 ```
-Browser (React)  ── cookie session ──►  Express API  ──►  SQLite (data volume)
-      ▲                                     │
-      └──── Server-Sent Events (live) ◄─────┤
-                                            ▼
-                               Send queue (1 message at a time,
-                               pause / cap / hours checks)
-                                            │
-                                            ▼
-                    whatsapp-web.js ─► Chromium ─► WhatsApp Web
-                    (LocalAuth session in wa_auth volume,
-                     auto-reconnect with backoff + watchdog)
+Browser (React) ── session cookie + CSRF header ──► Express routes (one table, access level per route)
+      ▲                                                  │  role guard → 403 + audit
+      └──── Server-Sent Events (per user / role) ◄───────┤
+                                                         ▼
+     UserService · Catalog (presets, templates) · Settings · AuditLog (append-only) · Backups · Scheduler
+                                                         │
+                         SendQueue (1 message at a time, pause / per-number cap / hours)
+                                                         │
+                    ConnectionManager ── active number ──► WaClient (whatsapp-web.js + Chromium)
+                    (linking browser only while showing a QR; others on standby)
+                                                         │
+                       SQLite via Drizzle ORM (WAL, migrations in drizzle/, runs on start-up)
 ```
 
-- `src/whatsapp.ts`: client lifecycle, QR code, reconnect, stale-lock cleanup, logout
-- `src/queue.ts`: persistent send worker and safety rules
-- `src/urls.ts`: link validation and clean-up
-- `src/app.ts`: HTTP API, sign-in, SSE; `src/db.ts`: SQLite schema
-- `web/`: React + Vite + Tailwind UI
+- `src/db/schema.ts`: tables (users, sessions, connections, groups, presets, preset_access, templates, jobs, send_results, audit_log)
+- `src/http/`: routes and guards (`routes-auth.ts`, `routes-send.ts`, `routes-admin.ts`)
+- `src/users.ts`, `src/auth/`: accounts, argon2id, sessions, lockout
+- `src/connections.ts`, `src/whatsapp.ts`: numbers and the WhatsApp client
+- `src/queue.ts`, `src/jobs.ts`: sending and results
+- `src/audit.ts`, `src/backups.ts`, `src/scheduler.ts`: audit log, backups, nightly jobs
+- `src/cli.ts`: `reset-admin`
 
 This tool only sends to groups the number already belongs to. It has no feature for finding,
 joining or scraping groups.

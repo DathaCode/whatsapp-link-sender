@@ -1,11 +1,15 @@
+import type { AuditContext, AuditLog } from './audit.js';
+import { SYSTEM } from './audit.js';
+import type { Catalog, Template } from './catalog.js';
 import type { Config } from './config.js';
-import type { Job, JobItem, Store, Template, WaitReason } from './db.js';
-import type { EventHub } from './events.js';
+import type { ConnectionManager } from './connections.js';
+import type { WaitReason } from './db/schema.js';
+import type { Job, JobItem, JobStore } from './jobs.js';
 import type { Logger } from './logger.js';
 import type { Settings } from './settings.js';
 import { inWindow, localTime } from './time.js';
 import type { Platform } from './urls.js';
-import { NotConnectedError, type WhatsApp } from './whatsapp.js';
+import { NotConnectedError } from './whatsapp.js';
 
 export interface QueueStatus {
   activeJobId: number | null;
@@ -18,10 +22,16 @@ export function renderTemplate(body: string, url: string): string {
   return body.includes('{url}') ? body.replaceAll('{url}', url) : `${body.trim()}\n${url}`.trim();
 }
 
+const WAIT_TEXT: Record<Exclude<WaitReason, null>, string> = {
+  connection_down: 'connection down',
+  outside_hours: 'outside sending hours',
+  daily_cap: 'daily cap reached',
+};
+
 /**
- * The single send worker. Jobs live in SQLite, so anything not yet sent survives a
- * restart. Exactly one message is in flight at a time, and every safety rule
- * (pause, daily cap, sending hours) is checked here, on the server.
+ * The single send worker. Jobs live in the database, so anything not yet sent survives a
+ * restart. Exactly one message is in flight at a time, through the active connection, and
+ * every safety rule (pause, per-connection daily cap, sending hours) is checked here.
  */
 export class SendQueue {
   private stopping = false;
@@ -33,22 +43,35 @@ export class SendQueue {
 
   constructor(
     private cfg: Config,
-    private store: Store,
-    private wa: WhatsApp,
+    private jobs: JobStore,
+    private connections: ConnectionManager,
+    private catalog: Catalog,
     private settings: Settings,
-    private hub: EventHub,
+    private audit: AuditLog,
     private log: Logger,
+    /** Called whenever a job changes (for live updates). */
+    private onJob: (job: Job) => void = () => {},
+    private onStatus: (s: QueueStatus) => void = () => {},
   ) {}
 
   start() {
-    const recovered = this.store.recoverInterruptedItems();
-    if (recovered) this.log.warn({ recovered }, 'marked messages interrupted by a restart as failed');
+    for (const item of this.jobs.recoverInterrupted()) {
+      this.audit.record(SYSTEM, {
+        action: 'send.result',
+        outcome: 'failure',
+        reason: 'interrupted by restart',
+        targetType: 'send_result',
+        targetId: item.id,
+        connectionId: item.connectionId,
+        details: { group: item.groupName },
+      });
+    }
     // Be polite after a restart too: wait at least the minimum pause before the first send.
     this.nextSendAt = Date.now() + this.settings.get().minDelaySeconds * 1000;
     this.loopDone = this.loop().catch((e) => this.log.fatal({ err: String(e) }, 'send loop crashed'));
   }
 
-  /** Re-check right away (new job, cancel, settings change, WhatsApp back online). */
+  /** Re-check right away (new job, cancel, settings change, connection back online). */
   kick() {
     this.wakeUp?.();
   }
@@ -61,32 +84,48 @@ export class SendQueue {
     return localTime(new Date(), this.cfg.TZ).day;
   }
 
+  /** Today's usage of the active connection against the cap. */
   usage() {
-    const s = this.settings.get();
-    return { day: this.today(), used: this.store.usageOn(this.today()), cap: s.dailyCap };
+    const a = this.connections.active();
+    return { day: this.today(), used: a ? this.connections.usageToday(a.id) : 0, cap: this.settings.get().dailyCap, connectionId: a?.id ?? null };
+  }
+
+  private ownerCtx(jobId: number): AuditContext {
+    const o = this.jobs.ownerOf(jobId);
+    return o ? { actor: { userId: o.id, username: o.username, role: o.role } } : SYSTEM;
   }
 
   enqueue(input: {
+    userId: number;
     url: string;
     platform: Platform;
     templateId: number | null;
+    presetIds: number[];
     parentJobId?: number | null;
     groups: { id: string; name: string }[];
   }): number {
-    const id = this.store.createJob({ ...input, parentJobId: input.parentJobId ?? null });
-    this.log.info({ jobId: id, groups: input.groups.length, url: input.url }, 'send job queued');
+    const id = this.jobs.create({
+      ...input,
+      parentJobId: input.parentJobId ?? null,
+      requestedConnectionId: this.connections.active()?.id ?? null,
+    });
     this.emitJob(id);
     this.kick();
     return id;
   }
 
-  cancel(jobId: number): boolean {
-    const job = this.store.getJob(jobId);
+  cancel(ctx: AuditContext, jobId: number): boolean {
+    const job = this.jobs.get(jobId);
     if (!job || job.status === 'done' || job.status === 'cancelled') return false;
-    this.store.cancelPendingItems(jobId);
+    const skipped = this.jobs.cancelPending(jobId);
     // A message being sent right now finishes on its own; the loop then closes the job.
-    if (!job.items.some((i) => i.status === 'sending')) this.store.setJobStatus(jobId, 'cancelled');
-    this.log.info({ jobId }, 'send job cancelled');
+    if (!job.items?.some((i) => i.status === 'sending')) this.jobs.setStatus(jobId, 'cancelled', null, ctx.actor.userId ?? undefined);
+    this.audit.record(ctx, {
+      action: 'send.job_cancelled',
+      targetType: 'job',
+      targetId: jobId,
+      details: { url: job.url, sent: job.sent, skipped, owner: job.username },
+    });
     this.emitJob(jobId);
     this.kick();
     return true;
@@ -94,10 +133,11 @@ export class SendQueue {
 
   private blockReason(): WaitReason {
     const s = this.settings.get();
-    if (!this.wa.isReady()) return 'whatsapp_offline';
+    if (!this.connections.isReady()) return 'connection_down';
     const now = localTime(new Date(), this.cfg.TZ);
     if (!inWindow(now.minutes, s.windowStart, s.windowEnd)) return 'outside_hours';
-    if (this.store.usageOn(now.day) >= s.dailyCap) return 'daily_cap';
+    const a = this.connections.active();
+    if (a && this.connections.usageToday(a.id) >= s.dailyCap) return 'daily_cap';
     return null;
   }
 
@@ -117,20 +157,15 @@ export class SendQueue {
 
   private setStatus(next: QueueStatus) {
     const s = this.status;
-    if (
-      s.activeJobId !== next.activeJobId ||
-      s.waitReason !== next.waitReason ||
-      s.nextSendAt !== next.nextSendAt ||
-      s.queued !== next.queued
-    ) {
+    if (s.activeJobId !== next.activeJobId || s.waitReason !== next.waitReason || s.nextSendAt !== next.nextSendAt || s.queued !== next.queued) {
       this.status = next;
-      this.hub.emit('queue', next);
+      this.onStatus(next);
     }
   }
 
   private async loop() {
     while (!this.stopping) {
-      const active = this.store.activeJobs();
+      const active = this.jobs.active();
       const job = active[0];
       if (!job) {
         this.setStatus({ activeJobId: null, waitReason: null, nextSendAt: null, queued: 0 });
@@ -138,11 +173,21 @@ export class SendQueue {
         continue;
       }
 
-      const item = this.store.nextPendingItem(job.id);
+      const item = this.jobs.nextPending(job.id);
       if (!item) {
-        const wasCancelled = this.store.getJob(job.id)?.items.some((i) => i.status === 'cancelled');
-        this.store.setJobStatus(job.id, wasCancelled ? 'cancelled' : 'done');
-        this.log.info({ jobId: job.id }, 'send job finished');
+        const cancelled = this.jobs.hasCancelledItems(job.id);
+        this.jobs.setStatus(job.id, cancelled ? 'cancelled' : 'done');
+        const fin = this.jobs.get(job.id)!;
+        if (!cancelled) {
+          this.audit.record(this.ownerCtx(job.id), {
+            action: 'send.job_completed',
+            outcome: fin.failed ? 'failure' : 'success',
+            reason: fin.failed ? `${fin.failed} of ${fin.total} groups failed` : null,
+            targetType: 'job',
+            targetId: job.id,
+            details: { url: fin.url, total: fin.total, sent: fin.sent, failed: fin.failed },
+          });
+        }
         this.emitJob(job.id);
         continue;
       }
@@ -150,8 +195,16 @@ export class SendQueue {
       const block = this.blockReason();
       if (block) {
         if (job.status !== 'waiting' || job.waitReason !== block) {
-          this.store.setJobStatus(job.id, 'waiting', block);
-          this.log.info({ jobId: job.id, reason: block }, 'send job waiting');
+          this.jobs.setStatus(job.id, 'waiting', block);
+          this.audit.record(this.ownerCtx(job.id), {
+            action: 'send.blocked',
+            outcome: 'failure',
+            reason: block,
+            targetType: 'job',
+            targetId: job.id,
+            connectionId: this.connections.active()?.id ?? null,
+            details: { url: job.url, deferred: true, explanation: `Paused: ${WAIT_TEXT[block]}. It continues automatically.` },
+          });
           this.emitJob(job.id);
         }
         this.setStatus({ activeJobId: job.id, waitReason: block, nextSendAt: null, queued: active.length - 1 });
@@ -160,17 +213,22 @@ export class SendQueue {
       }
 
       if (job.status !== 'running') {
-        this.store.setJobStatus(job.id, 'running');
+        const first = !job.startedAt;
+        this.jobs.setStatus(job.id, 'running');
+        if (first) {
+          this.audit.record(this.ownerCtx(job.id), {
+            action: 'send.job_started',
+            targetType: 'job',
+            targetId: job.id,
+            connectionId: this.connections.active()?.id ?? null,
+            details: { url: job.url, groups: job.total },
+          });
+        }
         this.emitJob(job.id);
       }
 
       const wait = this.nextSendAt - Date.now();
-      this.setStatus({
-        activeJobId: job.id,
-        waitReason: null,
-        nextSendAt: wait > 0 ? this.nextSendAt : Date.now(),
-        queued: active.length - 1,
-      });
+      this.setStatus({ activeJobId: job.id, waitReason: null, nextSendAt: wait > 0 ? this.nextSendAt : Date.now(), queued: active.length - 1 });
       if (wait > 0) {
         await this.sleep(wait);
         continue; // re-check everything: the job may have been cancelled meanwhile
@@ -181,22 +239,38 @@ export class SendQueue {
   }
 
   private pickTemplate(templateId: number | null): Template | null {
-    const all = this.store.listTemplates();
+    const all = this.catalog.listTemplates();
     if (templateId !== null) {
       const chosen = all.find((t) => t.id === templateId);
       if (chosen) return chosen;
     }
-    // Rotate: random active template, avoiding the one used last time.
     const pool = all.filter((t) => t.active);
     if (pool.length === 0) return null;
     const fresh = pool.length > 1 ? pool.filter((t) => t.id !== this.lastTemplateId) : pool;
     return fresh[Math.floor(Math.random() * fresh.length)] ?? null;
   }
 
+  private recordResult(job: Job, item: JobItem, connectionId: number | null, outcome: 'success' | 'failure', error: string | null) {
+    return this.audit.record(this.ownerCtx(job.id), {
+      action: 'send.result',
+      outcome,
+      reason: error,
+      targetType: 'send_result',
+      targetId: item.id,
+      connectionId,
+      details: { jobId: job.id, group: item.groupName, groupId: item.groupId, url: job.url, result: outcome === 'success' ? 'sent' : 'failed' },
+    });
+  }
+
   private async sendItem(job: Job, item: JobItem) {
-    const group = this.store.listGroups().find((g) => g.id === item.groupId);
-    if (group?.readOnly) {
-      this.store.finishItem(item.id, 'failed', 'Only admins can post in this group, or this number left it.');
+    const conn = this.connections.active();
+    const group = this.connections.activeGroups().find((g) => g.id === item.groupId);
+    if (!group || group.readOnly) {
+      const error = !group
+        ? 'The active WhatsApp number is not in this group. Add the number to the group, then refresh groups.'
+        : 'Only admins can post in this group, or the number left it.';
+      const auditId = this.recordResult(job, item, conn?.id ?? null, 'failure', error);
+      this.jobs.finish(item.id, 'failed', error, auditId);
       this.emitJob(job.id);
       return;
     }
@@ -204,51 +278,48 @@ export class SendQueue {
     const template = this.pickTemplate(job.templateId);
     this.lastTemplateId = template?.id ?? null;
     const text = template ? renderTemplate(template.body, job.url) : job.url;
-    const day = this.today();
-
-    this.store.markItemSending(item.id, text, day);
+    this.jobs.markSending(item.id, text, this.today(), conn!.id);
     this.emitJob(job.id);
     const log = this.log.child({ jobId: job.id, itemId: item.id, group: item.groupName });
 
     try {
-      await this.wa.sendText(item.groupId, text);
-      this.store.finishItem(item.id, 'sent');
+      const usedId = await this.connections.sendText(item.groupId, text);
+      const auditId = this.recordResult(job, item, usedId, 'success', null);
+      this.jobs.finish(item.id, 'sent', null, auditId);
       log.info('message sent');
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (e instanceof NotConnectedError || !this.wa.isReady()) {
+      if (e instanceof NotConnectedError || !this.connections.isReady()) {
         // Not this group's fault: put it back and wait for the connection.
-        this.store.finishItem(item.id, 'pending');
+        this.jobs.finish(item.id, 'pending');
         log.warn({ err: msg }, 'send interrupted by connection loss; will retry');
       } else {
-        this.store.finishItem(item.id, 'failed', friendlyError(msg));
+        const error = friendlyError(msg);
+        const auditId = this.recordResult(job, item, conn!.id, 'failure', error);
+        this.jobs.finish(item.id, 'failed', error, auditId);
         log.warn({ err: msg }, 'message failed');
       }
     }
 
     const s = this.settings.get();
-    const delay = (s.minDelaySeconds + Math.random() * (s.maxDelaySeconds - s.minDelaySeconds)) * 1000;
-    this.nextSendAt = Date.now() + delay;
+    this.nextSendAt = Date.now() + (s.minDelaySeconds + Math.random() * (s.maxDelaySeconds - s.minDelaySeconds)) * 1000;
     this.emitJob(job.id);
-    this.hub.emit('usage', this.usage());
   }
 
   private emitJob(id: number) {
-    const job = this.store.getJob(id);
-    if (job) this.hub.emit('job', job);
+    const job = this.jobs.get(id);
+    if (job) this.onJob(job);
   }
 
   async stop() {
     this.stopping = true;
     this.kick();
-    if (this.loopDone) {
-      await Promise.race([this.loopDone, new Promise((r) => setTimeout(r, 15_000))]);
-    }
+    if (this.loopDone) await Promise.race([this.loopDone, new Promise((r) => setTimeout(r, 15_000))]);
   }
 }
 
 function friendlyError(msg: string): string {
   if (/timed out/i.test(msg)) return 'WhatsApp took too long to respond. Try again later.';
-  if (/not.*found|invalid wid|no lid/i.test(msg)) return 'This group could not be found. Press “Refresh groups”.';
+  if (/not.*found|invalid wid|no lid/i.test(msg)) return 'This group could not be found. Ask an admin to refresh groups.';
   return `WhatsApp did not accept the message (${msg.slice(0, 160)}).`;
 }

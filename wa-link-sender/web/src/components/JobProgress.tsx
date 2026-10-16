@@ -3,8 +3,8 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { api, errorMessage } from '../api';
 import { waitReasonText } from '../format';
-import { useApp } from '../store';
-import type { ItemStatus, Job } from '../types';
+import { useLive } from '../store';
+import type { ItemStatus, Job, SafetySettings } from '../types';
 import { PlatformIcon } from './PlatformIcon';
 
 const ITEM_ICON: Record<ItemStatus, { icon: typeof Check; cls: string; label: string }> = {
@@ -25,10 +25,10 @@ function useCountdown(target: number | null) {
   return target ? Math.max(0, Math.ceil((target - now) / 1000)) : null;
 }
 
-export function JobProgress({ job }: { job: Job }) {
-  const { state } = useApp();
-  const isActive = state.queue.activeJobId === job.id;
-  const countdown = useCountdown(isActive ? state.queue.nextSendAt : null);
+export function JobProgress({ job, settings }: { job: Job; settings: SafetySettings | null }) {
+  const { queue, isAdmin } = useLive();
+  const isActive = queue?.activeJobId === job.id;
+  const countdown = useCountdown(isActive ? (queue?.nextSendAt ?? null) : null);
   const done = job.sent + job.failed;
   const pct = job.total ? Math.round((done / job.total) * 100) : 0;
   const finished = job.status === 'done' || job.status === 'cancelled';
@@ -37,7 +37,7 @@ export function JobProgress({ job }: { job: Job }) {
   let headline: string;
   if (job.status === 'done') headline = job.failed ? `Finished. ${job.failed} of ${job.total} failed.` : `Sent to all ${job.total} groups.`;
   else if (job.status === 'cancelled') headline = `Stopped. Sent to ${job.sent} of ${job.total} groups.`;
-  else if (job.status === 'waiting') headline = waitReasonText(job.waitReason, state.settings);
+  else if (job.status === 'waiting') headline = waitReasonText(job.waitReason, settings);
   else if (job.status === 'queued') headline = 'Waiting for the send before this one to finish.';
   else if (job.items?.some((i) => i.status === 'sending')) headline = `Sending ${done + 1} of ${job.total}…`;
   else if (countdown !== null && countdown > 0) headline = `Next group in ${countdown} s (a short pause keeps your number safe).`;
@@ -63,7 +63,10 @@ export function JobProgress({ job }: { job: Job }) {
           <h3 id={`job-${job.id}`} className="font-semibold" aria-live="polite">
             {headline}
           </h3>
-          <p className="truncate text-sm text-muted">{job.url}</p>
+          <p className="truncate text-sm text-muted">
+            {job.url}
+            {isAdmin && <span> · by {job.username}</span>}
+          </p>
         </div>
         {!finished && (
           <button type="button" className="btn-quiet min-h-9 px-3 text-sm" onClick={cancel} disabled={cancelling}>

@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     # tini as PID 1: forwards SIGTERM and reaps Chromium's child processes.
     init: true
+    # All settings (accounts, sessions, audit retention, backups, safety) come from .env.
     env_file: .env
     environment:
       DATA_DIR: /app/data
@@ -16,9 +17,9 @@ services:
     ports:
       - "127.0.0.1:${PORT:-3100}:${PORT:-3100}"
     volumes:
-      - wa_auth:/app/.wwebjs_auth # WhatsApp login (survives restarts and rebuilds)
+      - wa_auth:/app/.wwebjs_auth # WhatsApp logins, one folder per connection (survive restarts and rebuilds)
       - wa_cache:/app/.wwebjs_cache # cached WhatsApp Web version
-      - app_data:/app/data # SQLite: history, queue, templates, presets, settings
+      - app_data:/app/data # SQLite (users, audit log, history, queue, presets, settings) + nightly backups in data/backups
     # Chromium needs more shared memory than Docker's 64 MB default.
     shm_size: 1gb
     # Chromium + Node normally use 400-900 MB; the cap stops a runaway browser from starving the host.

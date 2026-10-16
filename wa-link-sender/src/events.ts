@@ -1,19 +1,34 @@
 import type { Response } from 'express';
+import type { Role } from './db/schema.js';
 
-/** Fan-out of server events to every open browser tab via Server-Sent Events. */
+interface SseClient {
+  res: Response;
+  userId: number;
+  role: Role;
+  /** Re-validates the session; the stream is closed when it returns false. */
+  stillValid: () => boolean;
+}
+
+/** Server-Sent Events fan-out, filtered by user/role. */
 export class EventHub {
-  private clients = new Set<Response>();
+  private clients = new Set<SseClient>();
   private heartbeat: NodeJS.Timeout;
 
   constructor() {
-    // Comment lines keep proxies from closing idle connections.
+    // Comment lines keep proxies from closing idle connections; also drop ended sessions.
     this.heartbeat = setInterval(() => {
-      for (const res of this.clients) res.write(': ping\n\n');
+      for (const c of this.clients) {
+        if (!c.stillValid()) {
+          this.write(c.res, 'signed_out', {});
+          c.res.end();
+          this.clients.delete(c);
+        } else c.res.write(': ping\n\n');
+      }
     }, 25_000);
     this.heartbeat.unref();
   }
 
-  add(res: Response, initial: Record<string, unknown>) {
+  add(res: Response, who: Omit<SseClient, 'res'>, initial: Record<string, unknown>) {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
@@ -22,12 +37,33 @@ export class EventHub {
     });
     res.write('retry: 3000\n\n');
     for (const [event, data] of Object.entries(initial)) this.write(res, event, data);
-    this.clients.add(res);
-    res.on('close', () => this.clients.delete(res));
+    const client = { res, ...who };
+    this.clients.add(client);
+    res.on('close', () => this.clients.delete(client));
   }
 
-  emit(event: string, data: unknown) {
-    for (const res of this.clients) this.write(res, event, data);
+  /** Everyone signed in. */
+  all(event: string, data: unknown) {
+    for (const c of this.clients) this.write(c.res, event, data);
+  }
+
+  admins(event: string, data: unknown) {
+    for (const c of this.clients) if (c.role === 'ADMIN') this.write(c.res, event, data);
+  }
+
+  /** Admins plus one specific user (e.g. the owner of a job). */
+  adminsAnd(userId: number, event: string, data: unknown) {
+    for (const c of this.clients) if (c.role === 'ADMIN' || c.userId === userId) this.write(c.res, event, data);
+  }
+
+  /** Ends all streams of a user (forced sign-out, disable, role change). */
+  disconnectUser(userId: number) {
+    for (const c of this.clients) {
+      if (c.userId !== userId) continue;
+      this.write(c.res, 'signed_out', {});
+      c.res.end();
+      this.clients.delete(c);
+    }
   }
 
   private write(res: Response, event: string, data: unknown) {
@@ -36,7 +72,7 @@ export class EventHub {
 
   close() {
     clearInterval(this.heartbeat);
-    for (const res of this.clients) res.end();
+    for (const c of this.clients) c.res.end();
     this.clients.clear();
   }
 }
