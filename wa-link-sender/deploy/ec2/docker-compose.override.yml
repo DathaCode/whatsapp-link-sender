@@ -1,0 +1,23 @@
+# EC2 shared-host overrides for wa-link-sender.
+#
+# On the server, copy this file next to docker-compose.yml:
+#   cp deploy/ec2/docker-compose.override.yml docker-compose.override.yml
+# `docker compose` then merges it automatically. The root copy is git-ignored, so `git pull` keeps working.
+#
+# The shared Caddy (on the external `web` network) proxies to:  wa-link-sender:3100
+services:
+  app:
+    # Fixed, host-unique name. Use it as the Caddy upstream (not "app": see notes).
+    container_name: wa-link-sender
+    # Listing networks replaces the implicit "default only", so both must be named.
+    networks:
+      - default # the project's own network (wa-link-sender_default)
+      - web # the shared ingress network; Caddy reaches the app here
+    # Ports: nothing to add. docker-compose.yml already publishes only 127.0.0.1:${PORT}:${PORT},
+    # which is loopback-only (handy for an SSH tunnel if Caddy is down). Adding a `ports:` entry here
+    # would APPEND a second mapping, not replace it. To publish nothing at all (Compose >= 2.24.4):
+    # ports: !reset []
+
+networks:
+  web:
+    external: true # created and owned by the shared Caddy stack; Compose must not create or delete it

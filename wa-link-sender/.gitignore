@@ -10,3 +10,6 @@ data/
 .devdata.log
 .cj
 *.log
+
+# Server-specific Compose overrides (template lives in deploy/ec2/)
+/docker-compose.override.yml
