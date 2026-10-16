@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+@import '@fontsource-variable/noto-sans-sinhala';
 /*
  * WhatsApp-inspired palette (WhatsApp Web light & dark). Dark mode follows the system setting.
  * Accent text/buttons use WhatsApp's teal (#008069) in light mode for contrast; #00a884 in dark.
@@ -66,6 +67,8 @@
 }
 
 @theme inline {
+  /* Message editor & previews: renders Sinhala conjuncts (with ZWJ) correctly, then system fonts. */
+  --font-message: 'Noto Sans Sinhala Variable', 'Noto Sans Sinhala', 'Iskoola Pota', 'Nirmala UI', 'Segoe UI', 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', Helvetica, Arial, sans-serif;
   --font-sans: 'Segoe UI', 'Helvetica Neue', Helvetica, 'Lucida Grande', Arial, Ubuntu, Cantarell, 'Fira Sans', sans-serif;
   --color-bg: var(--bg);
   --color-surface: var(--surface);

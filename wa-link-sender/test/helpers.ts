@@ -10,7 +10,8 @@ import { auditLog } from '../src/db/schema.js';
 import { createApp } from '../src/http/app.js';
 import { logger } from '../src/logger.js';
 import { createServices } from '../src/services.js';
-import type { GroupInfo, WaRuntimeState } from '../src/whatsapp.js';
+import type { SendMode } from '../src/jobs.js';
+import { SendError, type GroupInfo, type WaRuntimeState } from '../src/whatsapp.js';
 
 logger.level = 'silent';
 
@@ -26,8 +27,11 @@ export class FakeWorld {
     { id: '333@g.us', name: 'Gamma group', readOnly: false },
     { id: '444@g.us', name: 'Admins only', readOnly: true },
   ];
-  sent: { clientId: string; to: string; text: string }[] = [];
+  sent: { clientId: string; to: string; text: string; imagePath?: string | null; mode?: SendMode }[] = [];
   failFor = new Set<string>();
+  /** Fail before anything is sent, once (to test the single safe retry). */
+  prepFailOnce = new Set<string>();
+  prepFailAlways = new Set<string>();
   latest() {
     return this.runtimes[this.runtimes.length - 1]!;
   }
@@ -116,9 +120,11 @@ export class FakeRuntime extends EventEmitter implements WaRuntime {
       rawKeys: ['announce', 'id', 'subject'],
     }));
   }
-  async sendText(to: string, text: string) {
-    if (this.world.failFor.has(to)) throw new Error('boom');
-    this.world.sent.push({ clientId: this.clientId, to, text });
+  async sendPost(to: string, post: { text: string; imagePath: string | null; mode: SendMode }) {
+    if (this.world.prepFailOnce.delete(to)) throw new SendError('could not open the group', 'no');
+    if (this.world.prepFailAlways.has(to)) throw new SendError('could not open the group', 'no');
+    if (this.world.failFor.has(to)) throw new SendError('boom', 'maybe');
+    this.world.sent.push({ clientId: this.clientId, to, text: post.text, imagePath: post.imagePath, mode: post.mode });
   }
 }
 
@@ -170,7 +176,8 @@ export async function harness(env: Record<string, string> = {}) {
   const world = new FakeWorld();
   const svc = createServices(cfg, logger, { runtimeFactory: (id) => new FakeRuntime(id, world) });
   await svc.users.ensureInitialAdmin();
-  svc.catalog.seedTemplates();
+  svc.catalog.seedSnippets();
+  svc.queue.retryPauseMs = 10;
   const { app, routes } = createApp({ cfg, log: logger, publicDir: path.join(dir, 'public'), ...svc });
 
   const client = () => new Client(request.agent(app));

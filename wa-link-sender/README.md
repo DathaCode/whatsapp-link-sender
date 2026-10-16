@@ -1,13 +1,16 @@
 # wa-link-sender
 
-Paste a **Facebook / TikTok / YouTube** post link into a web page and send it to WhatsApp groups that
-your own WhatsApp number is **already a member of**. Runs 24/7 in Docker, on Windows (Docker Desktop)
-or a Linux server.
+Write or paste a full post (text, links, emoji, an optional image) into a web page and send it to
+WhatsApp groups that your own WhatsApp number is **already a member of**. Runs 24/7 in Docker, on
+Windows (Docker Desktop) or a Linux server.
+
+- **Exact text.** Sinhala (including the zero-width joiner), styled letters like 𝗙𝗢𝗟𝗟𝗢𝗪, emoji and blank lines are sent exactly as typed. Only tracking parameters (`si`, `utm_*`, `fbclid`…) are removed from links.
+- **Optional image.** JPG, PNG or WebP up to 5 MB, re-encoded with all metadata removed, sent with the text as its caption.
 
 - **User accounts with two roles.** Admins manage everything. Users can only send to the presets (group lists) they were given and see their own history.
 - **Managed WhatsApp numbers.** Link numbers by QR code, choose the one active number, and see status, possible bans and per-number stats.
 - **Complete audit log.** Every sign-in, change, refused request and per-group send result is recorded and append-only, with a searchable Logs page and CSV export.
-- **Safety rules enforced on the server.** Random pause between groups (default 15–40 s), a daily limit per number, sending hours, a duplicate-link warning, and one message at a time.
+- **Safety rules enforced on the server.** Random pause between groups (default 15–40 s, 30–90 s with an image), a daily limit per number, sending hours, duplicate warnings (same text, same image or same main link), allowed link domains, and one message at a time.
 - Pending sends survive restarts. Nightly database backups are made automatically.
 
 It uses [whatsapp-web.js](https://wwebjs.dev) (a "linked device", like WhatsApp Web). This is not an
@@ -109,6 +112,7 @@ records the real client IP (`TRUST_PROXY` trusts the private Docker network by d
 | `TRUST_PROXY` | `loopback, uniquelocal` | Which proxies may report the client IP: `false`, `true`, a hop count, or address list |
 | `AUDIT_RETENTION_DAYS` | `365` | Audit entries older than this are removed nightly (minimum 30) |
 | `BACKUP_KEEP` | `14` | Nightly database backups to keep |
+| `UPLOAD_RETENTION_DAYS` | `90` | Attached images are deleted after this many days (history shows “image expired”) |
 | `MIN_DELAY_SECONDS` / `MAX_DELAY_SECONDS` | `15` / `40` | Random pause between groups (minimum 5) |
 | `DAILY_MESSAGE_CAP` | `150` | Max messages per WhatsApp number per day |
 | `SEND_WINDOW_START` / `SEND_WINDOW_END` | `08:00` / `21:00` | Sending hours; outside them sends wait |
@@ -116,6 +120,30 @@ records the real client IP (`TRUST_PROXY` trusts the private Docker network by d
 
 The safety values in `.env` are defaults. Admins can change them on **Settings**, and every change is
 audit-logged with before and after values. After editing `.env`, run `docker compose up -d`.
+
+### Settings page (admins)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Pause between groups | 15–40 s | Random pause for text-only posts |
+| Pause for posts with an image | 30–90 s | Random pause when an image is attached |
+| How to send a post with an image | One message | **One message:** image + caption (≤1,024 characters, links show as plain links). **Two messages:** image, then the text (keeps the link preview card; counts 2 against the daily limit) |
+| Allowed sites | hiru.lk, hirunews.lk, youtube.com, youtu.be, facebook.com, fb.watch, tiktok.com | Users can only send links to these (and their subdomains); admins must confirm others |
+| Repeating links | the YouTube / Facebook / TikTok profile links | Links in every post; never count as “already sent” |
+| Snippets | “Follow us footer” | Reusable text blocks everyone can insert on the Send page |
+
+## Sending a post
+
+1. **Message:** write or paste the whole post. The counter shows characters against WhatsApp’s limit
+   (65,536 for a text message, 1,024 for an image caption). Links appear below as chips: *allowed* or
+   *not allowed*, *cleaned* when tracking was removed, *footer* when they don’t count for duplicates.
+   Use the snippet buttons to insert the footer at the cursor. The draft is saved on the server as you type.
+2. **Image (optional):** drag it in, click to choose, or press **Ctrl+V** anywhere on the page.
+3. **Groups:** pick presets / groups as before.
+4. Check the **preview** (WhatsApp formatting: `*bold*`, `_italic_`, `~strike~`), press **Send**, and confirm.
+
+You’re warned before resending something that looks like an earlier post: the same text (ignoring
+spacing), the same image, or the same *main* link. Footer links never trigger this.
 
 ---
 
@@ -268,7 +296,7 @@ Browser (React) ── session cookie + CSRF header ──► Express routes (on
       ▲                                                  │  role guard → 403 + audit
       └──── Server-Sent Events (per user / role) ◄───────┤
                                                          ▼
-     UserService · Catalog (presets, templates) · Settings · AuditLog (append-only) · Backups · Scheduler
+     UserService · Catalog (presets, snippets) · Composer · Images · Settings · AuditLog (append-only) · Backups · Scheduler
                                                          │
                          SendQueue (1 message at a time, pause / per-number cap / hours)
                                                          │
@@ -278,10 +306,12 @@ Browser (React) ── session cookie + CSRF header ──► Express routes (on
                        SQLite via Drizzle ORM (WAL, migrations in drizzle/, runs on start-up)
 ```
 
-- `src/db/schema.ts`: tables (users, sessions, connections, groups, presets, preset_access, templates, jobs, send_results, audit_log)
+- `src/db/schema.ts`: tables (users, sessions, connections, groups, presets, preset_access, snippets, drafts, uploads, jobs, job_main_links, send_results, audit_log)
 - `src/http/`: routes and guards (`routes-auth.ts`, `routes-send.ts`, `routes-admin.ts`)
 - `src/users.ts`, `src/auth/`: accounts, argon2id, sessions, lockout
 - `src/connections.ts`, `src/whatsapp.ts`: numbers and the WhatsApp client
+- `src/message.ts`, `src/compose.ts`: exact text, link cleanup, allowed domains, duplicate keys, limits
+- `src/images.ts`: image checks, re-encoding, metadata removal, retention
 - `src/queue.ts`, `src/jobs.ts`: sending and results
 - `src/audit.ts`, `src/backups.ts`, `src/scheduler.ts`: audit log, backups, nightly jobs
 - `src/cli.ts`: `reset-admin`

@@ -58,3 +58,23 @@ export function qs(params: Record<string, string | number | undefined | null>): 
   const s = p.toString();
   return s ? `?${s}` : '';
 }
+
+/** Uploads a file as the raw request body (the server re-encodes and checks it). */
+export async function uploadFile<T = unknown>(path: string, file: File): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': csrfToken, 'X-File-Name': encodeURIComponent(file.name || 'image') },
+      body: file,
+    });
+  } catch {
+    throw new ApiError(0, 'Cannot reach the app. Check your connection and try again.', 'network', {});
+  }
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const code = typeof data.code === 'string' ? data.code : undefined;
+  if (res.status === 401) unauthorizedListeners.forEach((fn) => fn(code));
+  if (!res.ok) throw new ApiError(res.status, typeof data.error === 'string' ? data.error : `Upload failed (${res.status}).`, code, data);
+  return data as T;
+}

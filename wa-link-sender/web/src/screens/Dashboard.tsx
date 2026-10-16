@@ -2,7 +2,7 @@ import { AlertTriangle, ArrowRight, Ban, Send, Smartphone, Users } from 'lucide-
 import { useCallback, useEffect, useState } from 'react';
 import { api, errorMessage } from '../api';
 import { ConnectionBadge, Badge } from '../components/StatusBadge';
-import { formatTime, plural, timeAgo } from '../format';
+import { firstLines, formatTime, plural, timeAgo } from '../format';
 import { useLive } from '../store';
 import type { ConnectionView, Job, Outcome, QueueStatus, SafetySettings, SendingStatus, Usage } from '../types';
 
@@ -13,7 +13,7 @@ interface DashboardData {
   settings: SafetySettings;
   queue: QueueStatus;
   activeJobs: Job[];
-  recentFailures: { id: number; jobId: number; groupName: string; error: string | null; attemptedAt: number | null; url: string; username: string }[];
+  recentFailures: { id: number; jobId: number; groupName: string; error: string | null; attemptedAt: number | null; url: string; messageText: string | null; username: string }[];
   recentLogins: { ts: number; username: string; outcome: Outcome; reason: string | null; ip: string | null }[];
   counts: { users: number; jobsToday: number; deniedLast24h: number };
 }
@@ -106,8 +106,8 @@ export function Dashboard({ go }: { go: (tab: 'connections' | 'logs' | 'history'
                   <span className="shrink-0 text-muted">{f.attemptedAt ? timeAgo(f.attemptedAt) : ''}</span>
                 </p>
                 <p className="truncate text-bad">{f.error}</p>
-                <p className="truncate text-muted">
-                  {f.url} · {f.username}
+                <p className="font-message truncate text-muted">
+                  {firstLines(f.messageText ?? f.url, 1)} · {f.username}
                 </p>
               </li>
             ))}

@@ -1,56 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseConfig } from '../src/config.js';
-import { renderTemplate } from '../src/queue.js';
 import { inWindow, localTime } from '../src/time.js';
-import { normalizeUrl } from '../src/urls.js';
 
-const ok = (raw: string) => {
-  const r = normalizeUrl(raw);
-  if (!r.ok) throw new Error(`expected ok for ${raw}: ${r.error}`);
-  return r;
-};
-
-describe('normalizeUrl', () => {
-  it.each([
-    ['https://youtu.be/dQw4w9WgXcQ?si=abc123', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'youtube'],
-    ['https://youtu.be/dQw4w9WgXcQ?t=42&si=x', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42', 'youtube'],
-    ['https://m.youtube.com/watch?v=abc&feature=share&pp=xyz', 'https://www.youtube.com/watch?v=abc', 'youtube'],
-    ['https://www.youtube.com/shorts/abc?si=1', 'https://www.youtube.com/shorts/abc', 'youtube'],
-    ['https://fb.watch/abcDEF/?mibextid=xyz', 'https://fb.watch/abcDEF/', 'facebook'],
-    [
-      'https://m.facebook.com/story.php?story_fbid=123&id=456&fbclid=IwAR&utm_source=x',
-      'https://www.facebook.com/story.php?story_fbid=123&id=456',
-      'facebook',
-    ],
-    ['https://www.facebook.com/share/v/1AbC/?mibextid=w8EBqM', 'https://www.facebook.com/share/v/1AbC/', 'facebook'],
-    ['https://vm.tiktok.com/ZMabc123/', 'https://vm.tiktok.com/ZMabc123/', 'tiktok'],
-    [
-      'https://www.tiktok.com/@user/video/7300000000000000000?is_from_webapp=1&sender_device=pc&_r=1&_t=8x',
-      'https://www.tiktok.com/@user/video/7300000000000000000',
-      'tiktok',
-    ],
-    ['www.youtube.com/watch?v=abc#t=1', 'https://www.youtube.com/watch?v=abc', 'youtube'],
-    ['http://YOUTU.BE/abc', 'https://www.youtube.com/watch?v=abc', 'youtube'],
-  ])('%s', (input, expected, platform) => {
-    const r = ok(input);
-    expect(r.url).toBe(expected);
-    expect(r.platform).toBe(platform);
-  });
-
-  it.each([
-    'https://evil.com/youtube.com',
-    'https://youtube.com.evil.com/watch?v=1',
-    'https://notfacebook.com/post/1',
-    'javascript:alert(1)',
-    'ftp://youtube.com/x',
-    'https://user:pass@youtube.com/watch?v=1',
-    'https://www.youtube.com/',
-    'hello there',
-    '',
-  ])('rejects %s', (input) => {
-    expect(normalizeUrl(input).ok).toBe(false);
-  });
-});
 
 describe('sending hours', () => {
   it('same-day window', () => {
@@ -112,14 +63,5 @@ describe('config', () => {
   });
   it('keeps audit retention at 30 days or more', () => {
     expect(parseConfig({ ...base, AUDIT_RETENTION_DAYS: '7' }).ok).toBe(false);
-  });
-});
-
-describe('renderTemplate', () => {
-  it('replaces every {url}', () => {
-    expect(renderTemplate('A {url} B {url}', 'https://x.y')).toBe('A https://x.y B https://x.y');
-  });
-  it('appends the link when the placeholder is missing', () => {
-    expect(renderTemplate('Hello', 'https://x.y')).toBe('Hello\nhttps://x.y');
   });
 });

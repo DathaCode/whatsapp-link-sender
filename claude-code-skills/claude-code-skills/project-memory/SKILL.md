@@ -80,6 +80,19 @@ already in**, via whatsapp-web.js (linked device). Code: `stdrd/wa-link-sender/`
 - Logo: `web/src/components/Logo.tsx` + `web/public/favicon.svg` (Simple Icons CC0 glyph on a green bubble); owner's 24×24 PNG is the
   fallback `favicon.png`. Shell lives in `web/src/Shell.tsx`; Send preview is a real outgoing bubble (`ChatBubble.tsx`).
 
+## Message composer (2026-10-17, branch feature/message-composer)
+- Send = one message box (+ optional image) + groups. "Post link" field, platform-only URL validation and templates were REMOVED
+  (templates table dropped; old jobs keep url/platform and stay readable). Owner decisions: test send on prod after deploy;
+  retry once ONLY when nothing was sent (SendError.sent = no|maybe|partial); links found in any snippet or in the repeating-links
+  list never count as "main" links; templates dropped (not converted).
+- Exactness (src/message.ts, tested byte-for-byte): no Unicode normalization, keep U+200D, emoji, blank lines; only CRLF→LF, trim
+  outer whitespace, strip tracking params from links (cleanLink keeps everything else as written).
+- Limits: text 65,536; caption 1,024 (Business-API figure; consumer app may allow more). Two-message image mode lifts the caption
+  limit and counts 2 per group (send_results.messages_count). Image pauses 30–90 s default.
+- Images (src/images.ts): content-sniffed, sharp → JPEG ≤1600 px q82, metadata stripped, DATA_DIR/uploads/<32hex>.jpg, owner/admin
+  only, UPLOAD_RETENTION_DAYS (90) prune at 03:30. Duplicate: same textKey, same original image sha256, or shared main link (job_main_links).
+- Not yet verified against live WhatsApp: whatsapp-web.js MessageMedia + caption send on 1.34.7 (owner tests on prod).
+
 ## Open ideas / not done
 - Healthcheck doesn't auto-restart an unhealthy container on plain Docker (only marks it); the in-app watchdog covers WhatsApp hangs.
 - `npm audit` flags `basic-ftp`/`extract-zip` from puppeteer's browser downloader. Not used at runtime in Docker (download skipped).

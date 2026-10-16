@@ -5,9 +5,10 @@ import QRCode from 'qrcode';
 import wwebjs from 'whatsapp-web.js';
 import type { Config } from './config.js';
 import { classifyGroups, type GroupInfo, type RawChat } from './groups.js';
+import type { SendMode } from './jobs.js';
 import type { Logger } from './logger.js';
 
-const { Client, LocalAuth } = wwebjs;
+const { Client, LocalAuth, MessageMedia } = wwebjs;
 type WClient = InstanceType<typeof Client>;
 
 export type WaRuntimeState = 'starting' | 'qr' | 'authenticating' | 'ready' | 'reconnecting' | 'stopped';
@@ -408,10 +409,37 @@ export class WaClient extends EventEmitter {
     return classifyGroups(await this.inspectChats(true));
   }
 
-  /** Sends a text message to a group, showing "typing…" for a moment first like a person would. */
-  async sendText(groupId: string, text: string) {
+  /**
+   * Sends one post to a group:
+   *   - text only: a normal message with link preview
+   *   - image + mode "single": the image with the full text as its caption (one message)
+   *   - image + mode "two": the image, then the text as its own message (keeps the link preview card)
+   * The text is passed through untouched (no normalization, zero-width characters kept).
+   *
+   * Errors are SendErrors that say whether anything may have reached the group, so the caller
+   * only retries when it is safe (sent = 'no').
+   */
+  async sendPost(groupId: string, post: { text: string; imagePath: string | null; mode: SendMode }) {
     const client = this.requireClient();
     const page = client.pupPage;
+
+    // ---- prepare: nothing has been sent yet ----
+    let media: InstanceType<typeof MessageMedia> | null = null;
+    try {
+      const exists = await withTimeout(
+        page!.evaluate(async (id) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return !!(await (window as any).WWebJS.getChat(id, { getAsModel: false }));
+        }, groupId),
+        30_000,
+        'Opening the group',
+      );
+      if (!exists) throw new Error('chat not found');
+      if (post.imagePath) media = MessageMedia.fromFilePath(post.imagePath);
+    } catch (e) {
+      throw new SendError(errText(e), 'no');
+    }
+
     const chatstate = (state: 'typing' | 'stop') =>
       page?.evaluate(
         (id, st) => {
@@ -428,27 +456,29 @@ export class WaClient extends EventEmitter {
     } catch (e) {
       this.log.debug({ clientId: this.clientId, err: errText(e) }, 'typing indicator skipped');
     }
-    // Check the group exists first: after sending, client.sendMessage() can't tell us that.
-    const exists = await withTimeout(
-      page!.evaluate(async (id) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return !!(await (window as any).WWebJS.getChat(id, { getAsModel: false }));
-      }, groupId),
-      30_000,
-      'Opening the group',
-    );
-    if (!exists) throw new Error('chat not found');
 
-    // whatsapp-web.js 1.34.x returns undefined even for messages that WERE sent: it looks the new
-    // message up by the id it generated, and WhatsApp Web now stores group messages under a
-    // different (LID-based) id. So "no exception" means sent; the return value is ignored.
-    const sent = await withTimeout(
-      // sendSeen:false avoids a known breakage in recent WhatsApp Web builds.
-      client.sendMessage(groupId, text, { sendSeen: false, linkPreview: true }),
-      60_000,
-      'Sending',
-    );
-    if (!sent) this.log.debug({ clientId: this.clientId, groupId }, 'sent; library returned no message object (known 1.34.x behaviour)');
+    // ---- send: from here a failure may or may not have reached the group ----
+    // whatsapp-web.js 1.34.x returns undefined even for messages that WERE sent (it looks the new
+    // message up by a pre-generated id that WhatsApp Web no longer uses), so "no exception" = sent.
+    const textOptions = { sendSeen: false, linkPreview: true }; // sendSeen:false avoids a known breakage
+    try {
+      if (!media) {
+        await withTimeout(client.sendMessage(groupId, post.text, textOptions), 60_000, 'Sending');
+      } else if (post.mode === 'single') {
+        await withTimeout(client.sendMessage(groupId, media, { sendSeen: false, caption: post.text }), 120_000, 'Sending the image');
+      } else {
+        await withTimeout(client.sendMessage(groupId, media, { sendSeen: false }), 120_000, 'Sending the image');
+        try {
+          await sleep(1500);
+          await withTimeout(client.sendMessage(groupId, post.text, textOptions), 60_000, 'Sending');
+        } catch (e) {
+          throw new SendError(`The image was sent but the text was not (${errText(e)})`, 'partial');
+        }
+      }
+    } catch (e) {
+      if (e instanceof SendError) throw e;
+      throw new SendError(errText(e), 'maybe');
+    }
   }
 
   private requireClient(): WClient {
@@ -470,5 +500,20 @@ export class WaClient extends EventEmitter {
 export class NotConnectedError extends Error {
   constructor() {
     super('WhatsApp is not connected right now.');
+  }
+}
+
+/**
+ * A failed send. `sent` says what may have reached the group:
+ *   no      - nothing was sent (safe to retry)
+ *   maybe   - WhatsApp may have delivered it (timeout or error during sending): never retried automatically
+ *   partial - two-message mode: the image went out, the text did not
+ */
+export class SendError extends Error {
+  constructor(
+    message: string,
+    public sent: 'no' | 'maybe' | 'partial',
+  ) {
+    super(message);
   }
 }

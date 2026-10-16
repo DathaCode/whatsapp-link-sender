@@ -1,25 +1,31 @@
+import fs from 'node:fs';
 import type { Request } from 'express';
 import { z } from 'zod';
 import { SESSION_COOKIE } from '../auth/sessions.js';
+import { imageInfo } from '../compose.js';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../errors.js';
 import type { Job } from '../jobs.js';
-import { normalizeUrl } from '../urls.js';
+import { CAPTION_MAX, TEXT_MAX, cleanMessage, mainLinks, normalizeMessage, sha256, textKey } from '../message.js';
 import { ctxOf, me, parseCookies } from './context.js';
 import { route, type Deps, type RouteDef } from './app.js';
 
 const idParam = z.coerce.number().int().positive();
 const groupId = z.string().regex(/^[\w.-]+@g\.us$/, 'Only WhatsApp groups can be chosen.');
+const uploadId = z.string().regex(/^[a-f0-9]{32}$/);
 
 const sendBody = z.object({
-  url: z.string().max(2000),
+  text: z.string().max(TEXT_MAX * 4),
+  uploadId: uploadId.nullable().default(null),
   groupIds: z.array(groupId).min(1, 'Choose at least one group.').max(1000),
   presetIds: z.array(z.number().int().positive()).max(100).default([]),
-  templateId: z.number().int().positive().nullable().default(null),
   confirmDuplicate: z.boolean().default(false),
+  /** Admins only: send although some links are outside the allowed domains. */
+  confirmLinks: z.boolean().default(false),
 });
 
 export function sendRoutes(d: Deps): RouteDef[] {
   const isAdmin = (req: Request) => me(req).role === 'ADMIN';
+  const userOf = (req: Request) => ({ id: me(req).id, isAdmin: isAdmin(req) });
 
   /** What a user may send to: admins anything on the active number; users only their presets. */
   const scope = (req: Request) => {
@@ -46,6 +52,9 @@ export function sendRoutes(d: Deps): RouteDef[] {
       ? 'Sending is paused because the active WhatsApp number is not connected. Open Connections to fix it.'
       : 'Sending is paused right now. Please contact your admin.';
 
+  /** Analysis as returned to the browser (no file paths). */
+  const publicAnalysis = (a: ReturnType<Deps['composer']['analyze']>) => ({ ...a, image: imageInfo(a.image) });
+
   return [
     route('get', '/api/send/options', 'user', (req, res) => {
       const { presetIds, allowed } = scope(req);
@@ -61,7 +70,9 @@ export function sendRoutes(d: Deps): RouteDef[] {
         isAdmin: isAdmin(req),
         presets,
         groups,
-        templates: d.catalog.listTemplates(),
+        snippets: d.catalog.listSnippets(),
+        allowedDomains: d.settings.messaging().allowedDomains,
+        limits: { text: TEXT_MAX, caption: CAPTION_MAX, imageBytes: 5 * 1024 * 1024 },
         settings: d.settings.get(),
         usage: d.queue.usage(),
         sending: sendingFor(req),
@@ -70,19 +81,72 @@ export function sendRoutes(d: Deps): RouteDef[] {
       });
     }),
 
-    route('post', '/api/links/check', 'user', (req, res) => {
-      const r = normalizeUrl(req.body?.url);
-      if (!r.ok) {
-        res.json(r);
-        return;
-      }
-      res.json({ ...r, previous: d.jobs.lastSendOfUrl(r.url) ?? null });
+    /** Live preview: exactly what would be sent, with every check. Nothing is logged. */
+    route('post', '/api/messages/check', 'user', (req, res) => {
+      const body = z.object({ text: z.string().max(TEXT_MAX * 4), uploadId: uploadId.nullable().default(null) }).parse(req.body);
+      res.json(publicAnalysis(d.composer.analyze(body, userOf(req))));
     }),
 
+    // ---------------- drafts ----------------
+    route('get', '/api/drafts', 'user', (req, res) => {
+      const draft = d.drafts.get(me(req).id);
+      let image = null;
+      if (draft.uploadId) {
+        try {
+          image = imageInfo(d.images.usable(draft.uploadId, me(req).id, isAdmin(req)));
+        } catch {
+          image = null; // expired: the draft just loses its image
+        }
+      }
+      res.json({ draft: { ...draft, uploadId: image ? draft.uploadId : null }, image });
+    }),
+    route('put', '/api/drafts', 'user', (req, res) => {
+      const body = z.object({ text: z.string().max(TEXT_MAX * 4), uploadId: uploadId.nullable().default(null) }).parse(req.body);
+      res.json({ draft: d.drafts.save(me(req).id, body) });
+    }),
+    route('delete', '/api/drafts', 'user', (req, res) => {
+      d.drafts.clear(me(req).id);
+      res.json({ ok: true });
+    }),
+
+    // ---------------- images ----------------
+    /** Body: the raw file (application/octet-stream). Header X-File-Name: original name (URI-encoded). */
+    route('post', '/api/uploads', 'user', async (req, res) => {
+      if (!Buffer.isBuffer(req.body)) throw badRequest('Send the image file as the request body.');
+      let name = 'image';
+      try {
+        name = decodeURIComponent(req.get('x-file-name') ?? 'image');
+      } catch {
+        /* keep default */
+      }
+      const row = await d.images.store(ctxOf(req), me(req).id, req.body, name);
+      res.status(201).json({ image: imageInfo(row) });
+    }),
+    /** Only the uploader (or an admin) can view an image. Never publicly cached. */
+    route('get', '/api/uploads/:id', 'user', (req, res) => {
+      const id = uploadId.parse(req.params.id);
+      const u = d.images.get(id);
+      if (!u || (!isAdmin(req) && u.userId !== me(req).id)) {
+        if (u) throw forbidden('You can only view your own images.', 'not_owner');
+        throw notFound('Image not found.');
+      }
+      const file = d.images.fileOf(id);
+      if (u.deletedAt || !fs.existsSync(file)) {
+        res.status(410).json({ error: 'This image has expired.', code: 'image_expired' });
+        return;
+      }
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Disposition', 'inline');
+      fs.createReadStream(file).pipe(res);
+    }),
+
+    // ---------------- sending ----------------
     route('post', '/api/jobs', 'user', (req, res) => {
       const ctx = ctxOf(req);
       const u = me(req);
-      const blocked = (reason: string, outcome: 'failure' | 'denied' = 'failure', details: Record<string, unknown> = {}) =>
+      const blocked = (reason: string, outcome: 'failure' | 'denied', details: Record<string, unknown> = {}) =>
         d.audit.record(ctx, { action: 'send.blocked', outcome, reason, connectionId: d.connections.active()?.id ?? null, details });
 
       const parsed = sendBody.safeParse(req.body);
@@ -91,17 +155,52 @@ export function sendRoutes(d: Deps): RouteDef[] {
         throw parsed.error;
       }
       const body = parsed.data;
+      const a = d.composer.analyze({ text: body.text, uploadId: body.uploadId }, userOf(req));
+      const base = {
+        messageText: a.text,
+        messageSha256: a.sha256,
+        links: a.links.map((l) => ({ original: l.original, cleaned: l.cleaned, host: l.host })),
+        image: imageInfo(a.image),
+        sendMode: a.mode,
+        groups: body.groupIds.length,
+        presetIds: body.presetIds,
+      };
 
-      const link = normalizeUrl(body.url);
-      if (!link.ok) {
-        blocked('invalid_url', 'failure', { url: body.url.slice(0, 300) });
-        throw badRequest(link.error, 'invalid_url');
+      if (a.imageError) {
+        blocked('image_missing', 'failure', base);
+        throw badRequest(a.imageError, 'image_missing');
       }
-      const groupIds = [...new Set(body.groupIds)];
-      const presetIds = [...new Set(body.presetIds)];
-      const base = { url: link.url, presetIds, groups: groupIds.length };
+      if (a.empty) {
+        blocked('empty_message', 'failure', base);
+        throw badRequest('Write a message first. Links are optional, but the message needs some text.', 'empty_message');
+      }
+      if (a.tooLong) {
+        blocked('too_long', 'failure', { ...base, chars: a.chars, limit: a.limit });
+        throw badRequest(
+          a.mode === 'single'
+            ? `With an image the text is sent as its caption, and WhatsApp allows at most ${a.limit.toLocaleString()} characters there (yours has ${a.chars.toLocaleString()}). Shorten the text or remove the image.`
+            : `WhatsApp allows at most ${a.limit.toLocaleString()} characters in one message (yours has ${a.chars.toLocaleString()}).`,
+          'too_long',
+        );
+      }
+
+      const warnings: Record<string, unknown> = {};
+      if (a.disallowed.length) {
+        if (!isAdmin(req)) {
+          blocked('link_not_allowed', 'denied', { ...base, hosts: a.disallowed });
+          throw forbidden(`These links aren’t allowed: ${a.disallowed.join(', ')}. Remove them or ask an admin to allow the site.`, 'link_not_allowed');
+        }
+        if (!body.confirmLinks) {
+          blocked('link_not_allowed', 'failure', { ...base, hosts: a.disallowed, needsConfirmation: true });
+          throw conflict(`Some links are outside the allowed sites: ${a.disallowed.join(', ')}.`, 'links_need_confirmation', { hosts: a.disallowed });
+        }
+        warnings.disallowedLinks = { hosts: a.disallowed, resolution: 'confirmed by admin' };
+        d.audit.record(ctx, { action: 'send.links_confirmed', reason: 'admin confirmed links outside the allowed domains', details: { ...base, hosts: a.disallowed } });
+      }
 
       // Permission: users may only use their presets and groups inside them.
+      const groupIds = [...new Set(body.groupIds)];
+      const presetIds = [...new Set(body.presetIds)];
       const { presetIds: allowedPresets, allowed } = scope(req);
       if (allowedPresets && allowed) {
         const badPreset = presetIds.filter((p) => !allowedPresets.includes(p));
@@ -118,11 +217,6 @@ export function sendRoutes(d: Deps): RouteDef[] {
         throw new AppError(503, pausedMessage(req), 'sending_paused', { sending: sendingFor(req) });
       }
 
-      if (body.templateId !== null && !d.catalog.template(body.templateId)) {
-        blocked('invalid_template', 'failure', base);
-        throw badRequest('That message template was deleted. Pick another one.');
-      }
-
       const known = new Map(d.connections.activeGroups().map((g) => [g.id, g]));
       const unknown = groupIds.filter((g) => !known.has(g) || known.get(g)!.readOnly);
       if (unknown.length) {
@@ -133,20 +227,31 @@ export function sendRoutes(d: Deps): RouteDef[] {
         );
       }
 
-      const previous = d.jobs.lastSendOfUrl(link.url);
-      if (previous && !body.confirmDuplicate) {
-        blocked('duplicate', 'failure', { ...base, previousJobId: previous.jobId });
-        throw conflict('This link was sent before.', 'duplicate', { duplicate: previous });
-      }
-      if (previous) {
-        d.audit.record(ctx, { action: 'send.duplicate_confirmed', targetType: 'url', targetId: link.url, details: { previousJobId: previous.jobId, previousAt: new Date(previous.at).toISOString() } });
+      if (a.duplicate) {
+        if (!body.confirmDuplicate) {
+          blocked('duplicate', 'failure', { ...base, duplicate: a.duplicate });
+          throw conflict('This looks like a post that was sent before.', 'duplicate', { duplicate: a.duplicate });
+        }
+        warnings.duplicate = { ...a.duplicate, resolution: 'resend confirmed' };
+        d.audit.record(ctx, {
+          action: 'send.duplicate_confirmed',
+          targetType: 'job',
+          targetId: a.duplicate.jobId,
+          details: { ...base, previousJobId: a.duplicate.jobId, previousAt: new Date(a.duplicate.at).toISOString(), reasons: a.duplicate.reasons },
+        });
       }
 
       const jobId = d.queue.enqueue({
         userId: u.id,
-        url: link.url,
-        platform: link.platform,
-        templateId: body.templateId,
+        messageText: a.text,
+        messageSha256: a.sha256,
+        textKey: a.textKey,
+        imageId: a.image?.id ?? null,
+        imageSha256: a.image?.originalSha256 ?? null,
+        sendMode: a.mode,
+        links: base.links,
+        mainLinks: a.mainLinks,
+        warnings: Object.keys(warnings).length ? warnings : null,
         presetIds,
         groups: groupIds.map((id) => ({ id, name: known.get(id)!.name })),
       });
@@ -156,8 +261,9 @@ export function sendRoutes(d: Deps): RouteDef[] {
         targetType: 'job',
         targetId: jobId,
         connectionId: d.connections.active()?.id ?? null,
-        details: { ...base, presetNames, templateId: body.templateId, connection: sending.connection?.label },
+        details: { ...base, presetNames, mainLinks: a.mainLinks, connection: sending.connection?.label, warnings: Object.keys(warnings).length ? warnings : null },
       });
+      d.drafts.clear(u.id);
       res.status(201).json({ job: d.jobs.get(jobId), sending: sendingFor(req) });
     }),
 
@@ -185,19 +291,36 @@ export function sendRoutes(d: Deps): RouteDef[] {
       if (!failed.length) throw badRequest('Nothing failed in this send, so there is nothing to retry.');
       const { allowed } = scope(req);
       if (allowed && failed.some((g) => !allowed.has(g.id))) {
-        d.audit.record(ctx, { action: 'send.blocked', outcome: 'denied', reason: 'no_permission', details: { url: job.url, retryOf: job.id } });
+        d.audit.record(ctx, { action: 'send.blocked', outcome: 'denied', reason: 'no_permission', details: { retryOf: job.id, messageSha256: job.messageSha256 } });
         throw forbidden('Some of these groups are no longer in your group lists. Ask your admin.', 'no_permission');
       }
       const sending = d.connections.sendingStatus();
       if (!sending.accepting) {
-        d.audit.record(ctx, { action: 'send.blocked', outcome: 'failure', reason: 'connection_down', details: { url: job.url, retryOf: job.id } });
+        d.audit.record(ctx, { action: 'send.blocked', outcome: 'failure', reason: 'connection_down', details: { retryOf: job.id } });
         throw new AppError(503, pausedMessage(req), 'sending_paused');
       }
+      if (job.imageId && !fs.existsSync(d.images.fileOf(job.imageId))) {
+        throw badRequest('The image of this send has expired, so it can’t be retried. Start a new send instead.', 'image_expired');
+      }
+      // Old (pre-composer) jobs only have a URL: retry sends that URL as the text.
+      const text = job.messageText ?? normalizeMessage(job.url);
+      const { links } = job.messageText ? { links: job.links } : cleanMessage(text);
+      const messaging = d.settings.messaging();
       const jobId = d.queue.enqueue({
         userId: me(req).id,
-        url: job.url,
-        platform: job.platform,
-        templateId: job.templateId,
+        messageText: text,
+        messageSha256: job.messageSha256 ?? sha256(text),
+        textKey: textKey(text),
+        imageId: job.imageId,
+        imageSha256: job.imageSha256,
+        sendMode: job.sendMode ?? 'text',
+        links,
+        mainLinks: mainLinks(
+          links,
+          d.catalog.listSnippets().map((s) => s.body),
+          messaging.repeatingLinks,
+        ),
+        warnings: { retryOf: job.id },
         presetIds: job.presetIds,
         parentJobId: job.id,
         groups: failed,
@@ -207,7 +330,16 @@ export function sendRoutes(d: Deps): RouteDef[] {
         targetType: 'job',
         targetId: jobId,
         connectionId: d.connections.active()?.id ?? null,
-        details: { url: job.url, groups: failed.length, retryOf: job.id, presetIds: job.presetIds },
+        details: {
+          messageText: text,
+          messageSha256: job.messageSha256 ?? sha256(text),
+          links,
+          image: imageInfo(job.imageId ? (d.images.get(job.imageId) ?? null) : null),
+          sendMode: job.sendMode ?? 'text',
+          groups: failed.length,
+          retryOf: job.id,
+          presetIds: job.presetIds,
+        },
       });
       res.status(201).json({ job: d.jobs.get(jobId) });
     }),

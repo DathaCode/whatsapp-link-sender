@@ -1,15 +1,15 @@
+import fs from 'node:fs';
 import type { AuditContext, AuditLog } from './audit.js';
 import { SYSTEM } from './audit.js';
-import type { Catalog, Template } from './catalog.js';
 import type { Config } from './config.js';
 import type { ConnectionManager } from './connections.js';
 import type { WaitReason } from './db/schema.js';
-import type { Job, JobItem, JobStore } from './jobs.js';
+import type { Images } from './images.js';
+import type { Job, JobItem, JobStore, NewJob, SendMode } from './jobs.js';
 import type { Logger } from './logger.js';
 import type { Settings } from './settings.js';
 import { inWindow, localTime } from './time.js';
-import type { Platform } from './urls.js';
-import { NotConnectedError } from './whatsapp.js';
+import { NotConnectedError, SendError } from './whatsapp.js';
 
 export interface QueueStatus {
   activeJobId: number | null;
@@ -18,19 +18,18 @@ export interface QueueStatus {
   queued: number;
 }
 
-export function renderTemplate(body: string, url: string): string {
-  return body.includes('{url}') ? body.replaceAll('{url}', url) : `${body.trim()}\n${url}`.trim();
-}
-
 const WAIT_TEXT: Record<Exclude<WaitReason, null>, string> = {
   connection_down: 'connection down',
   outside_hours: 'outside sending hours',
   daily_cap: 'daily cap reached',
 };
 
+/** Pause before the single automatic retry (only when nothing was sent). */
+export const RETRY_PAUSE_MS = 10_000;
+
 /**
  * The single send worker. Jobs live in the database, so anything not yet sent survives a
- * restart. Exactly one message is in flight at a time, through the active connection, and
+ * restart. Exactly one post is in flight at a time, through the active connection, and
  * every safety rule (pause, per-connection daily cap, sending hours) is checked here.
  */
 export class SendQueue {
@@ -38,14 +37,15 @@ export class SendQueue {
   private wakeUp: (() => void) | null = null;
   private loopDone: Promise<void> | null = null;
   private nextSendAt = 0;
-  private lastTemplateId: number | null = null;
   private status: QueueStatus = { activeJobId: null, waitReason: null, nextSendAt: null, queued: 0 };
+  /** Overridable in tests. */
+  retryPauseMs = RETRY_PAUSE_MS;
 
   constructor(
     private cfg: Config,
     private jobs: JobStore,
     private connections: ConnectionManager,
-    private catalog: Catalog,
+    private images: Images,
     private settings: Settings,
     private audit: AuditLog,
     private log: Logger,
@@ -84,7 +84,7 @@ export class SendQueue {
     return localTime(new Date(), this.cfg.TZ).day;
   }
 
-  /** Today's usage of the active connection against the cap. */
+  /** Today's usage of the active connection against the cap (WhatsApp messages; image+text pair = 2). */
   usage() {
     const a = this.connections.active();
     return { day: this.today(), used: a ? this.connections.usageToday(a.id) : 0, cap: this.settings.get().dailyCap, connectionId: a?.id ?? null };
@@ -95,15 +95,7 @@ export class SendQueue {
     return o ? { actor: { userId: o.id, username: o.username, role: o.role } } : SYSTEM;
   }
 
-  enqueue(input: {
-    userId: number;
-    url: string;
-    platform: Platform;
-    templateId: number | null;
-    presetIds: number[];
-    parentJobId?: number | null;
-    groups: { id: string; name: string }[];
-  }): number {
+  enqueue(input: Omit<NewJob, 'requestedConnectionId' | 'parentJobId'> & { parentJobId?: number | null }): number {
     const id = this.jobs.create({
       ...input,
       parentJobId: input.parentJobId ?? null,
@@ -118,26 +110,31 @@ export class SendQueue {
     const job = this.jobs.get(jobId);
     if (!job || job.status === 'done' || job.status === 'cancelled') return false;
     const skipped = this.jobs.cancelPending(jobId);
-    // A message being sent right now finishes on its own; the loop then closes the job.
+    // A post being sent right now finishes on its own; the loop then closes the job.
     if (!job.items?.some((i) => i.status === 'sending')) this.jobs.setStatus(jobId, 'cancelled', null, ctx.actor.userId ?? undefined);
     this.audit.record(ctx, {
       action: 'send.job_cancelled',
       targetType: 'job',
       targetId: jobId,
-      details: { url: job.url, sent: job.sent, skipped, owner: job.username },
+      details: { messageSha256: job.messageSha256, url: job.url, sent: job.sent, skipped, owner: job.username },
     });
     this.emitJob(jobId);
     this.kick();
     return true;
   }
 
-  private blockReason(): WaitReason {
+  /** WhatsApp messages one group of this job costs. */
+  private weightOf(job: Job): number {
+    return job.imageId && job.sendMode === 'two' ? 2 : 1;
+  }
+
+  private blockReason(job: Job): WaitReason {
     const s = this.settings.get();
     if (!this.connections.isReady()) return 'connection_down';
     const now = localTime(new Date(), this.cfg.TZ);
     if (!inWindow(now.minutes, s.windowStart, s.windowEnd)) return 'outside_hours';
     const a = this.connections.active();
-    if (a && this.connections.usageToday(a.id) >= s.dailyCap) return 'daily_cap';
+    if (a && this.connections.usageToday(a.id) + this.weightOf(job) > s.dailyCap) return 'daily_cap';
     return null;
   }
 
@@ -185,14 +182,14 @@ export class SendQueue {
             reason: fin.failed ? `${fin.failed} of ${fin.total} groups failed` : null,
             targetType: 'job',
             targetId: job.id,
-            details: { url: fin.url, total: fin.total, sent: fin.sent, failed: fin.failed },
+            details: { messageSha256: fin.messageSha256, url: fin.url, total: fin.total, sent: fin.sent, failed: fin.failed },
           });
         }
         this.emitJob(job.id);
         continue;
       }
 
-      const block = this.blockReason();
+      const block = this.blockReason(job);
       if (block) {
         if (job.status !== 'waiting' || job.waitReason !== block) {
           this.jobs.setStatus(job.id, 'waiting', block);
@@ -203,7 +200,7 @@ export class SendQueue {
             targetType: 'job',
             targetId: job.id,
             connectionId: this.connections.active()?.id ?? null,
-            details: { url: job.url, deferred: true, explanation: `Paused: ${WAIT_TEXT[block]}. It continues automatically.` },
+            details: { messageSha256: job.messageSha256, deferred: true, explanation: `Paused: ${WAIT_TEXT[block]}. It continues automatically.` },
           });
           this.emitJob(job.id);
         }
@@ -221,7 +218,7 @@ export class SendQueue {
             targetType: 'job',
             targetId: job.id,
             connectionId: this.connections.active()?.id ?? null,
-            details: { url: job.url, groups: job.total },
+            details: { messageSha256: job.messageSha256, groups: job.total, sendMode: job.sendMode },
           });
         }
         this.emitJob(job.id);
@@ -238,71 +235,109 @@ export class SendQueue {
     }
   }
 
-  private pickTemplate(templateId: number | null): Template | null {
-    const all = this.catalog.listTemplates();
-    if (templateId !== null) {
-      const chosen = all.find((t) => t.id === templateId);
-      if (chosen) return chosen;
-    }
-    const pool = all.filter((t) => t.active);
-    if (pool.length === 0) return null;
-    const fresh = pool.length > 1 ? pool.filter((t) => t.id !== this.lastTemplateId) : pool;
-    return fresh[Math.floor(Math.random() * fresh.length)] ?? null;
-  }
-
-  private recordResult(job: Job, item: JobItem, connectionId: number | null, outcome: 'success' | 'failure', error: string | null) {
-    return this.audit.record(this.ownerCtx(job.id), {
-      action: 'send.result',
-      outcome,
-      reason: error,
-      targetType: 'send_result',
-      targetId: item.id,
-      connectionId,
-      details: { jobId: job.id, group: item.groupName, groupId: item.groupId, url: job.url, result: outcome === 'success' ? 'sent' : 'failed' },
-    });
+  /** Everything the audit log must carry for a per-group result. */
+  private resultDetails(job: Job, item: JobItem, extra: Record<string, unknown>) {
+    const img = job.imageId ? this.images.get(job.imageId) : undefined;
+    return {
+      jobId: job.id,
+      group: item.groupName,
+      groupId: item.groupId,
+      messageText: job.messageText ?? job.url,
+      messageSha256: job.messageSha256,
+      links: job.links,
+      image: img
+        ? { id: img.id, originalName: img.originalName, originalSize: img.originalSize, originalSha256: img.originalSha256, processedSha256: img.sha256 }
+        : null,
+      sendMode: job.sendMode ?? 'text',
+      warnings: job.warnings,
+      ...extra,
+    };
   }
 
   private async sendItem(job: Job, item: JobItem) {
     const conn = this.connections.active();
+    const fail = (error: string, extra: Record<string, unknown> = {}) => {
+      const auditId = this.audit.record(this.ownerCtx(job.id), {
+        action: 'send.result',
+        outcome: 'failure',
+        reason: error,
+        targetType: 'send_result',
+        targetId: item.id,
+        connectionId: conn?.id ?? null,
+        details: this.resultDetails(job, item, { result: 'failed', ...extra }),
+      });
+      this.jobs.finish(item.id, 'failed', error, auditId);
+    };
+
     const group = this.connections.activeGroups().find((g) => g.id === item.groupId);
     if (!group || group.readOnly) {
-      const error = !group
-        ? 'The active WhatsApp number is not in this group. Add the number to the group, then refresh groups.'
-        : `This number can’t post here: ${group.reason ?? 'only admins can send'}. Refresh groups if that changed.`;
-      const auditId = this.recordResult(job, item, conn?.id ?? null, 'failure', error);
-      this.jobs.finish(item.id, 'failed', error, auditId);
+      fail(
+        !group
+          ? 'The active WhatsApp number is not in this group. Add the number to the group, then refresh groups.'
+          : `This number can’t post here: ${group.reason ?? 'only admins can send'}. Refresh groups if that changed.`,
+      );
       this.emitJob(job.id);
       return;
     }
 
-    const template = this.pickTemplate(job.templateId);
-    this.lastTemplateId = template?.id ?? null;
-    const text = template ? renderTemplate(template.body, job.url) : job.url;
-    this.jobs.markSending(item.id, text, this.today(), conn!.id);
-    this.emitJob(job.id);
-    const log = this.log.child({ jobId: job.id, itemId: item.id, group: item.groupName });
+    // Old (pre-composer) jobs carry only a URL.
+    const text = job.messageText ?? job.url;
+    const mode: SendMode = job.imageId ? (job.sendMode === 'two' ? 'two' : 'single') : 'text';
+    let imagePath: string | null = null;
+    if (job.imageId) {
+      imagePath = this.images.fileOf(job.imageId);
+      if (!fs.existsSync(imagePath)) {
+        fail('The attached image has expired and was deleted, so nothing was sent.');
+        this.emitJob(job.id);
+        return;
+      }
+    }
 
-    try {
-      const usedId = await this.connections.sendText(item.groupId, text);
-      const auditId = this.recordResult(job, item, usedId, 'success', null);
-      this.jobs.finish(item.id, 'sent', null, auditId);
-      log.info('message sent');
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (e instanceof NotConnectedError || !this.connections.isReady()) {
-        // Not this group's fault: put it back and wait for the connection.
-        this.jobs.finish(item.id, 'pending');
-        log.warn({ err: msg }, 'send interrupted by connection loss; will retry');
-      } else {
-        const error = friendlyError(msg);
-        const auditId = this.recordResult(job, item, conn!.id, 'failure', error);
-        this.jobs.finish(item.id, 'failed', error, auditId);
-        log.warn({ err: msg }, 'message failed');
+    const log = this.log.child({ jobId: job.id, itemId: item.id, group: item.groupName });
+    let attempt = 0;
+    for (;;) {
+      attempt++;
+      this.jobs.markSending(item.id, text, this.today(), conn!.id, this.weightOf(job));
+      this.emitJob(job.id);
+      try {
+        const usedId = await this.connections.sendPost(item.groupId, { text, imagePath, mode });
+        const auditId = this.audit.record(this.ownerCtx(job.id), {
+          action: 'send.result',
+          targetType: 'send_result',
+          targetId: item.id,
+          connectionId: usedId,
+          details: this.resultDetails(job, item, { result: 'sent', attempts: attempt }),
+        });
+        this.jobs.finish(item.id, 'sent', null, auditId);
+        log.info({ attempts: attempt, mode }, 'message sent');
+        break;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (e instanceof NotConnectedError || !this.connections.isReady()) {
+          // Not this group's fault: put it back and wait for the connection.
+          this.jobs.finish(item.id, 'pending');
+          log.warn({ err: msg }, 'send interrupted by connection loss; will retry');
+          break;
+        }
+        const sent = e instanceof SendError ? e.sent : 'maybe';
+        if (sent === 'no' && attempt < 2) {
+          log.warn({ err: msg }, 'nothing was sent; retrying once after a pause');
+          await new Promise((r) => setTimeout(r, this.retryPauseMs));
+          if (this.stopping) {
+            this.jobs.finish(item.id, 'pending');
+            break;
+          }
+          continue;
+        }
+        fail(friendlyError(msg, sent), { attempts: attempt, mayHaveBeenSent: sent !== 'no' });
+        log.warn({ err: msg, sent, attempts: attempt }, 'message failed');
+        break;
       }
     }
 
     const s = this.settings.get();
-    this.nextSendAt = Date.now() + (s.minDelaySeconds + Math.random() * (s.maxDelaySeconds - s.minDelaySeconds)) * 1000;
+    const [min, max] = job.imageId ? [s.imageMinDelaySeconds, s.imageMaxDelaySeconds] : [s.minDelaySeconds, s.maxDelaySeconds];
+    this.nextSendAt = Date.now() + (min + Math.random() * (max - min)) * 1000;
     this.emitJob(job.id);
   }
 
@@ -318,9 +353,10 @@ export class SendQueue {
   }
 }
 
-function friendlyError(msg: string): string {
-  if (/^Opening the group timed out/i.test(msg)) return 'WhatsApp took too long to open this group. Nothing was sent; try again later.';
+export function friendlyError(msg: string, sent: 'no' | 'maybe' | 'partial'): string {
+  if (sent === 'partial') return `${msg}. Check the group before retrying.`;
+  if (/chat not found|invalid wid|no lid/i.test(msg)) return 'This group could not be found, so nothing was sent. Ask an admin to refresh groups.';
+  if (sent === 'no') return `Nothing was sent (${msg.slice(0, 160)}). Tried twice.`;
   if (/timed out/i.test(msg)) return 'WhatsApp didn’t confirm in time. The message may still have been sent: check the group before retrying.';
-  if (/not.*found|invalid wid|no lid/i.test(msg)) return 'This group could not be found. Ask an admin to refresh groups.';
-  return `WhatsApp did not accept the message (${msg.slice(0, 160)}).`;
+  return `WhatsApp did not accept the message (${msg.slice(0, 160)}). Check the group before retrying.`;
 }

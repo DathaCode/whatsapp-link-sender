@@ -1,8 +1,8 @@
 import { asc, count, eq, inArray, sql } from 'drizzle-orm';
 import { diff, SYSTEM, type AuditContext, type AuditLog } from './audit.js';
 import type { Db } from './db/index.js';
-import { presetAccess, presetGroups, presets, templates } from './db/schema.js';
-import { badRequest, conflict, notFound } from './errors.js';
+import { presetAccess, presetGroups, presets, snippets } from './db/schema.js';
+import { conflict, notFound } from './errors.js';
 
 export interface PresetView {
   id: number;
@@ -11,36 +11,43 @@ export interface PresetView {
   userIds: number[];
 }
 
-export interface Template {
+export interface Snippet {
   id: number;
   name: string;
   body: string;
-  active: boolean;
 }
 
-const DEFAULT_TEMPLATES: { name: string; body: string }[] = [
-  { name: 'Just the link', body: '{url}' },
-  { name: 'New post', body: 'New post is up 👇\n{url}' },
-  { name: 'Please watch & share', body: 'Please watch and share 🙏\n{url}' },
-  { name: 'Check this out', body: 'Check this out: {url}' },
+const DEFAULT_SNIPPETS: { name: string; body: string }[] = [
+  {
+    name: 'Follow us footer',
+    body: [
+      'F𝗢𝗟𝗟𝗢𝗪 𝗨𝗦 𝗢𝗡',
+      '',
+      '🟠  YouTube👉 https://www.youtube.com/@HiruNewsOfficial',
+      '',
+      '🟠  Facebook 👉 https://www.facebook.com/hirunews',
+      '',
+      '🟠  TikTok 👉 https://www.tiktok.com/@hirunews',
+    ].join('\n'),
+  },
 ];
 
-/** Presets (named group lists) and message templates. */
+/** Presets (named group lists) and reusable text snippets. */
 export class Catalog {
   constructor(
     private db: Db,
     private audit: AuditLog,
   ) {}
 
-  seedTemplates() {
-    const n = this.db.select({ n: count() }).from(templates).get()?.n ?? 0;
+  seedSnippets() {
+    const n = this.db.select({ n: count() }).from(snippets).get()?.n ?? 0;
     if (n > 0) return;
     const now = Date.now();
     this.db
-      .insert(templates)
-      .values(DEFAULT_TEMPLATES.map((t) => ({ ...t, active: true, updatedAt: now })))
+      .insert(snippets)
+      .values(DEFAULT_SNIPPETS.map((t, i) => ({ ...t, sort: i, updatedAt: now })))
       .run();
-    this.audit.record(SYSTEM, { action: 'template.created', details: { seeded: DEFAULT_TEMPLATES.map((t) => t.name) } });
+    this.audit.record(SYSTEM, { action: 'snippet.created', details: { seeded: DEFAULT_SNIPPETS.map((t) => t.name) } });
   }
 
   // ---------------- presets ----------------
@@ -154,40 +161,44 @@ export class Catalog {
     );
   }
 
-  // ---------------- templates ----------------
+  // ---------------- snippets ----------------
 
-  listTemplates(): Template[] {
-    return this.db.select({ id: templates.id, name: templates.name, body: templates.body, active: templates.active }).from(templates).orderBy(asc(templates.id)).all();
+  listSnippets(): Snippet[] {
+    return this.db
+      .select({ id: snippets.id, name: snippets.name, body: snippets.body })
+      .from(snippets)
+      .orderBy(asc(snippets.sort), asc(snippets.id))
+      .all();
   }
 
-  template(id: number): Template | undefined {
-    return this.listTemplates().find((t) => t.id === id);
+  snippet(id: number): Snippet | undefined {
+    return this.listSnippets().find((t) => t.id === id);
   }
 
-  createTemplate(ctx: AuditContext, t: { name: string; body: string; active: boolean }): Template[] {
-    const row = this.db.insert(templates).values({ ...t, updatedAt: Date.now() }).returning({ id: templates.id }).get();
-    this.audit.record(ctx, { action: 'template.created', targetType: 'template', targetId: row.id, details: t });
-    return this.listTemplates();
+  createSnippet(ctx: AuditContext, t: { name: string; body: string }): Snippet[] {
+    const sort = this.listSnippets().length;
+    const row = this.db.insert(snippets).values({ ...t, sort, updatedAt: Date.now() }).returning({ id: snippets.id }).get();
+    this.audit.record(ctx, { action: 'snippet.created', targetType: 'snippet', targetId: row.id, details: t });
+    return this.listSnippets();
   }
 
-  updateTemplate(ctx: AuditContext, id: number, t: { name: string; body: string; active: boolean }): Template[] {
-    const before = this.template(id);
-    if (!before) throw notFound('That message template no longer exists.');
-    const changes = diff({ name: before.name, body: before.body, active: before.active }, t);
+  updateSnippet(ctx: AuditContext, id: number, t: { name: string; body: string }): Snippet[] {
+    const before = this.snippet(id);
+    if (!before) throw notFound('That snippet no longer exists.');
+    const changes = diff({ name: before.name, body: before.body }, t);
     if (Object.keys(changes).length) {
-      this.db.update(templates).set({ ...t, updatedAt: Date.now() }).where(eq(templates.id, id)).run();
-      this.audit.record(ctx, { action: 'template.updated', targetType: 'template', targetId: id, details: { changes } });
+      this.db.update(snippets).set({ ...t, updatedAt: Date.now() }).where(eq(snippets.id, id)).run();
+      this.audit.record(ctx, { action: 'snippet.updated', targetType: 'snippet', targetId: id, details: { changes } });
     }
-    return this.listTemplates();
+    return this.listSnippets();
   }
 
-  deleteTemplate(ctx: AuditContext, id: number): Template[] {
-    const before = this.template(id);
-    if (!before) throw notFound('That message template no longer exists.');
-    if (this.listTemplates().length <= 1) throw badRequest('Keep at least one message template.');
-    this.db.delete(templates).where(eq(templates.id, id)).run();
-    this.audit.record(ctx, { action: 'template.deleted', targetType: 'template', targetId: id, details: { name: before.name } });
-    return this.listTemplates();
+  deleteSnippet(ctx: AuditContext, id: number): Snippet[] {
+    const before = this.snippet(id);
+    if (!before) throw notFound('That snippet no longer exists.');
+    this.db.delete(snippets).where(eq(snippets.id, id)).run();
+    this.audit.record(ctx, { action: 'snippet.deleted', targetType: 'snippet', targetId: id, details: { name: before.name, body: before.body } });
+    return this.listSnippets();
   }
 }
 

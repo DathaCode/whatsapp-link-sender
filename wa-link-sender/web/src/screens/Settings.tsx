@@ -1,40 +1,42 @@
-import { DatabaseBackup, Download, Pencil, Plus, ShieldCheck, Trash2 } from 'lucide-react';
+import { DatabaseBackup, Download, ImageIcon, Link2, Pencil, Plus, ShieldCheck, TextQuote, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { toast } from 'sonner';
 import { api, errorMessage } from '../api';
 import { ConfirmDialog, Dialog } from '../components/Dialog';
 import { formatDateTime } from '../format';
-import type { SafetySettings, Template } from '../types';
+import type { MessagingSettings, SafetySettings, Snippet } from '../types';
+
+interface SettingsResponse {
+  settings: SafetySettings;
+  messaging: MessagingSettings;
+  messagingDefaults: MessagingSettings;
+  timeZone: string;
+  auditRetentionDays: number;
+  uploadRetentionDays: number;
+}
 
 export function Settings() {
+  const [data, setData] = useState<SettingsResponse | null>(null);
+  useEffect(() => {
+    api<SettingsResponse>('/api/admin/settings').then(setData, (e) => toast.error(errorMessage(e)));
+  }, []);
+  if (!data) return <p className="card p-5 text-muted">Loading…</p>;
   return (
     <div className="space-y-4">
-      <SafetyCard />
-      <TemplatesCard />
+      <SafetyCard initial={data.settings} timeZone={data.timeZone} uploadRetentionDays={data.uploadRetentionDays} />
+      <LinksCard initial={data.messaging} defaults={data.messagingDefaults} />
+      <SnippetsCard />
       <BackupsCard />
     </div>
   );
 }
 
-function SafetyCard() {
-  const [saved, setSaved] = useState<SafetySettings | null>(null);
-  const [form, setForm] = useState<SafetySettings | null>(null);
-  const [meta, setMeta] = useState<{ timeZone: string; auditRetentionDays: number }>({ timeZone: '', auditRetentionDays: 0 });
+function SafetyCard({ initial, timeZone, uploadRetentionDays }: { initial: SafetySettings; timeZone: string; uploadRetentionDays: number }) {
+  const [saved, setSaved] = useState(initial);
+  const [form, setForm] = useState(initial);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    api<{ settings: SafetySettings; timeZone: string; auditRetentionDays: number }>('/api/admin/settings').then(
-      (r) => {
-        setSaved(r.settings);
-        setForm(r.settings);
-        setMeta({ timeZone: r.timeZone, auditRetentionDays: r.auditRetentionDays });
-      },
-      (e) => toast.error(errorMessage(e)),
-    );
-  }, []);
-  if (!form || !saved) return <p className="card p-5 text-muted">Loading…</p>;
   const dirty = JSON.stringify(form) !== JSON.stringify(saved);
-  const num = (k: keyof SafetySettings) => (e: React.ChangeEvent<HTMLInputElement>) => setForm((f) => f && { ...f, [k]: e.target.value === '' ? 0 : Number(e.target.value) });
+  const num = (k: keyof SafetySettings) => (e: React.ChangeEvent<HTMLInputElement>) => setForm((f) => ({ ...f, [k]: e.target.value === '' ? 0 : Number(e.target.value) }));
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
@@ -43,7 +45,7 @@ function SafetyCard() {
       const r = await api<{ settings: SafetySettings }>('/api/admin/settings', { method: 'PUT', body: form });
       setSaved(r.settings);
       setForm(r.settings);
-      toast.success('Safety settings saved. The change is in the audit log.');
+      toast.success('Sending settings saved. The change is in the audit log.');
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -55,7 +57,7 @@ function SafetyCard() {
       const r = await api<{ settings: SafetySettings }>('/api/admin/settings/reset', { body: {} });
       setSaved(r.settings);
       setForm(r.settings);
-      toast.success('Back to the values from the .env file.');
+      toast.success('Back to the default values.');
     } catch (err) {
       toast.error(errorMessage(err));
     }
@@ -64,13 +66,13 @@ function SafetyCard() {
   return (
     <section className="card p-4 sm:p-5" aria-labelledby="safety-title">
       <h2 id="safety-title" className="flex items-center gap-2 text-lg font-bold">
-        <ShieldCheck className="size-5 text-accent" aria-hidden /> Safety
+        <ShieldCheck className="size-5 text-accent" aria-hidden /> Sending & safety
       </h2>
       <p className="hint mt-1">
-        These rules make sending look like a person and lower the chance of WhatsApp blocking the number. The server enforces them for everyone. Times use {meta.timeZone}.
+        These rules make sending look like a person and lower the chance of WhatsApp blocking the number. The server enforces them for everyone. Times use {timeZone}.
       </p>
       <form onSubmit={save} className="mt-4 grid gap-4 sm:grid-cols-2">
-        <fieldset className="sm:col-span-2">
+        <fieldset>
           <legend className="label">Pause between groups (seconds)</legend>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -87,6 +89,44 @@ function SafetyCard() {
             </div>
           </div>
         </fieldset>
+        <fieldset>
+          <legend className="label">Pause for posts with an image (seconds)</legend>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label htmlFor="imin" className="hint mb-1 block">
+                Shortest
+              </label>
+              <input id="imin" type="number" min={5} max={3600} className="field" value={form.imageMinDelaySeconds} onChange={num('imageMinDelaySeconds')} required />
+            </div>
+            <div>
+              <label htmlFor="imax" className="hint mb-1 block">
+                Longest
+              </label>
+              <input id="imax" type="number" min={5} max={3600} className="field" value={form.imageMaxDelaySeconds} onChange={num('imageMaxDelaySeconds')} required />
+            </div>
+          </div>
+        </fieldset>
+        <fieldset className="sm:col-span-2">
+          <legend className="label flex items-center gap-2">
+            <ImageIcon className="size-4 text-muted" aria-hidden /> How to send a post with an image
+          </legend>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(
+              [
+                ['single', 'One message (recommended)', 'The image with the full text as its caption. Links show as plain links; captions are limited to 1,024 characters.'],
+                ['two', 'Two messages', 'The image, then the text separately so WhatsApp shows the link preview card. Counts as 2 messages per group against the daily limit.'],
+              ] as const
+            ).map(([value, title, desc]) => (
+              <label key={value} className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 ${form.imageSendMode === value ? 'border-accent bg-accent-soft' : 'border-line'}`}>
+                <input type="radio" name="imageSendMode" className="mt-1 size-4 accent-(--accent)" checked={form.imageSendMode === value} onChange={() => setForm((f) => ({ ...f, imageSendMode: value }))} />
+                <span>
+                  <span className="block font-semibold">{title}</span>
+                  <span className="block text-sm text-muted">{desc}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
         <div>
           <label htmlFor="cap" className="label">
             Daily limit per number (messages)
@@ -99,17 +139,18 @@ function SafetyCard() {
             <label htmlFor="ws" className="sr-only">
               From
             </label>
-            <input id="ws" type="time" className="field" value={form.windowStart} onChange={(e) => setForm((f) => f && { ...f, windowStart: e.target.value })} required />
+            <input id="ws" type="time" className="field" value={form.windowStart} onChange={(e) => setForm((f) => ({ ...f, windowStart: e.target.value }))} required />
             <span className="text-muted">to</span>
             <label htmlFor="we" className="sr-only">
               Until
             </label>
-            <input id="we" type="time" className="field" value={form.windowEnd} onChange={(e) => setForm((f) => f && { ...f, windowEnd: e.target.value })} required />
+            <input id="we" type="time" className="field" value={form.windowEnd} onChange={(e) => setForm((f) => ({ ...f, windowEnd: e.target.value }))} required />
           </div>
         </fieldset>
+        <p className="hint sm:col-span-2">Attached images are deleted after {uploadRetentionDays} days (UPLOAD_RETENTION_DAYS); history then shows “image expired”.</p>
         <div className="flex flex-col-reverse gap-2 sm:col-span-2 sm:flex-row sm:justify-end">
           <button type="button" className="btn-quiet" onClick={reset}>
-            Use .env defaults
+            Use defaults
           </button>
           <button type="submit" className="btn-primary" disabled={!dirty || busy}>
             {busy ? 'Saving…' : 'Save'}
@@ -120,29 +161,98 @@ function SafetyCard() {
   );
 }
 
-function TemplatesCard() {
-  const [templates, setTemplates] = useState<Template[]>([]);
-  const [editing, setEditing] = useState<Partial<Template> | null>(null);
-  const [deleting, setDeleting] = useState<Template | null>(null);
+const toLines = (list: string[]) => list.join('\n');
+const fromLines = (text: string) =>
+  text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
 
-  useEffect(() => {
-    api<{ templates: Template[] }>('/api/admin/templates').then((r) => setTemplates(r.templates), (e) => toast.error(errorMessage(e)));
-  }, []);
+function LinksCard({ initial, defaults }: { initial: MessagingSettings; defaults: MessagingSettings }) {
+  const [saved, setSaved] = useState(initial);
+  const [domains, setDomains] = useState(toLines(initial.allowedDomains));
+  const [repeating, setRepeating] = useState(toLines(initial.repeatingLinks));
+  const [busy, setBusy] = useState(false);
+  const dirty = toLines(saved.allowedDomains) !== toLines(fromLines(domains)) || toLines(saved.repeatingLinks) !== toLines(fromLines(repeating));
 
-  const toggle = async (t: Template) => {
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
     try {
-      const r = await api<{ templates: Template[] }>(`/api/admin/templates/${t.id}`, { method: 'PUT', body: { ...t, active: !t.active } });
-      setTemplates(r.templates);
-    } catch (e) {
-      toast.error(errorMessage(e));
+      const r = await api<{ messaging: MessagingSettings }>('/api/admin/settings/messaging', {
+        method: 'PUT',
+        body: { allowedDomains: fromLines(domains), repeatingLinks: fromLines(repeating) },
+      });
+      setSaved(r.messaging);
+      setDomains(toLines(r.messaging.allowedDomains));
+      setRepeating(toLines(r.messaging.repeatingLinks));
+      toast.success('Link settings saved. The change is in the audit log.');
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setBusy(false);
     }
   };
+
+  return (
+    <section className="card p-4 sm:p-5" aria-labelledby="links-title">
+      <h2 id="links-title" className="flex items-center gap-2 text-lg font-bold">
+        <Link2 className="size-5 text-accent" aria-hidden /> Links
+      </h2>
+      <form onSubmit={save} className="mt-4 grid gap-4 sm:grid-cols-2">
+        <div>
+          <label htmlFor="domains" className="label">
+            Allowed sites
+          </label>
+          <textarea id="domains" className="field min-h-44 py-2.5 font-mono text-sm" value={domains} onChange={(e) => setDomains(e.target.value)} aria-describedby="domains-help" spellCheck={false} />
+          <p id="domains-help" className="hint mt-1.5">
+            One domain per line; subdomains are included (m.facebook.com counts as facebook.com). Users can’t send other links; admins must confirm.
+          </p>
+        </div>
+        <div>
+          <label htmlFor="repeating" className="label">
+            Repeating links
+          </label>
+          <textarea id="repeating" className="field min-h-44 py-2.5 font-mono text-sm" value={repeating} onChange={(e) => setRepeating(e.target.value)} aria-describedby="repeating-help" spellCheck={false} />
+          <p id="repeating-help" className="hint mt-1.5">
+            One link per line. Links that appear in every post (like your profile links) never count as “already sent”. Links inside snippets are ignored too.
+          </p>
+        </div>
+        <div className="flex flex-col-reverse gap-2 sm:col-span-2 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            className="btn-quiet"
+            onClick={() => {
+              setDomains(toLines(defaults.allowedDomains));
+              setRepeating(toLines(defaults.repeatingLinks));
+            }}
+          >
+            Fill in defaults
+          </button>
+          <button type="submit" className="btn-primary" disabled={!dirty || busy}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function SnippetsCard() {
+  const [snippets, setSnippets] = useState<Snippet[]>([]);
+  const [editing, setEditing] = useState<Partial<Snippet> | null>(null);
+  const [deleting, setDeleting] = useState<Snippet | null>(null);
+
+  useEffect(() => {
+    api<{ snippets: Snippet[] }>('/api/admin/snippets').then((r) => setSnippets(r.snippets), (e) => toast.error(errorMessage(e)));
+  }, []);
+
   const remove = async () => {
     if (!deleting) return;
     try {
-      const r = await api<{ templates: Template[] }>(`/api/admin/templates/${deleting.id}`, { method: 'DELETE' });
-      setTemplates(r.templates);
-      toast.success('Template deleted.');
+      const r = await api<{ snippets: Snippet[] }>(`/api/admin/snippets/${deleting.id}`, { method: 'DELETE' });
+      setSnippets(r.snippets);
+      toast.success('Snippet deleted.');
     } catch (e) {
       toast.error(errorMessage(e));
     } finally {
@@ -151,25 +261,23 @@ function TemplatesCard() {
   };
 
   return (
-    <section className="card p-4 sm:p-5" aria-labelledby="tpl-title">
+    <section className="card p-4 sm:p-5" aria-labelledby="snip-title">
       <div className="flex items-center justify-between gap-2">
-        <h2 id="tpl-title" className="text-lg font-bold">
-          Message templates
+        <h2 id="snip-title" className="flex items-center gap-2 text-lg font-bold">
+          <TextQuote className="size-5 text-accent" aria-hidden /> Snippets
         </h2>
-        <button type="button" className="btn-quiet min-h-9 px-3 text-sm" onClick={() => setEditing({ name: '', body: '{url}', active: true })}>
+        <button type="button" className="btn-quiet min-h-9 px-3 text-sm" onClick={() => setEditing({ name: '', body: '' })}>
           <Plus className="size-4" aria-hidden /> New
         </button>
       </div>
-      <p className="hint mt-1">
-        <code className="rounded bg-surface-2 px-1">{'{url}'}</code> is replaced by the link. Ticked templates are mixed when “Mix it up” is chosen.
-      </p>
+      <p className="hint mt-1">Reusable text blocks, like the “FOLLOW US ON” footer. Everyone can insert them on the Send page with one click.</p>
       <ul className="mt-3 divide-y divide-line rounded-xl border border-line" role="list">
-        {templates.map((t) => (
+        {snippets.length === 0 && <li className="p-3 text-muted">No snippets yet.</li>}
+        {snippets.map((t) => (
           <li key={t.id} className="flex items-start gap-3 p-3">
-            <input type="checkbox" className="mt-1 size-5 shrink-0 accent-(--accent)" checked={t.active} onChange={() => void toggle(t)} aria-label={`Use “${t.name}” when mixing messages`} />
             <div className="min-w-0 flex-1">
               <p className="font-semibold">{t.name}</p>
-              <p className="line-clamp-2 text-sm break-words whitespace-pre-wrap text-muted">{t.body}</p>
+              <p className="font-message line-clamp-3 text-sm break-words whitespace-pre-wrap text-muted">{t.body}</p>
             </div>
             <button type="button" className="grid size-10 place-items-center rounded-lg hover:bg-surface-2" onClick={() => setEditing(t)} aria-label={`Edit “${t.name}”`}>
               <Pencil className="size-4" />
@@ -180,17 +288,17 @@ function TemplatesCard() {
           </li>
         ))}
       </ul>
-      <TemplateDialog
+      <SnippetDialog
         value={editing}
         onClose={() => setEditing(null)}
         onSaved={(list) => {
-          setTemplates(list);
+          setSnippets(list);
           setEditing(null);
         }}
       />
       <ConfirmDialog
         open={!!deleting}
-        title="Delete this template?"
+        title="Delete this snippet?"
         body={<>“{deleting?.name}” will be removed. Past sends are not affected.</>}
         confirmLabel="Delete"
         danger
@@ -201,26 +309,25 @@ function TemplatesCard() {
   );
 }
 
-function TemplateDialog({ value, onClose, onSaved }: { value: Partial<Template> | null; onClose: () => void; onSaved: (t: Template[]) => void }) {
+function SnippetDialog({ value, onClose, onSaved }: { value: Partial<Snippet> | null; onClose: () => void; onSaved: (t: Snippet[]) => void }) {
   const [name, setName] = useState('');
   const [body, setBody] = useState('');
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     setName(value?.name ?? '');
-    setBody(value?.body ?? '{url}');
+    setBody(value?.body ?? '');
   }, [value]);
-  const missingUrl = !body.includes('{url}');
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     try {
-      const payload = { name: name.trim(), body, active: value?.active ?? true };
+      const payload = { name: name.trim(), body };
       const r = value?.id
-        ? await api<{ templates: Template[] }>(`/api/admin/templates/${value.id}`, { method: 'PUT', body: payload })
-        : await api<{ templates: Template[] }>('/api/admin/templates', { body: payload });
-      onSaved(r.templates);
-      toast.success('Template saved.');
+        ? await api<{ snippets: Snippet[] }>(`/api/admin/snippets/${value.id}`, { method: 'PUT', body: payload })
+        : await api<{ snippets: Snippet[] }>('/api/admin/snippets', { body: payload });
+      onSaved(r.snippets);
+      toast.success('Snippet saved.');
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -229,28 +336,26 @@ function TemplateDialog({ value, onClose, onSaved }: { value: Partial<Template> 
   };
 
   return (
-    <Dialog open={!!value} title={value?.id ? 'Edit template' : 'New template'} onClose={onClose}>
+    <Dialog open={!!value} title={value?.id ? 'Edit snippet' : 'New snippet'} onClose={onClose} wide>
       <form onSubmit={save} className="space-y-4">
         <div>
-          <label htmlFor="tpl-name" className="label">
+          <label htmlFor="snip-name" className="label">
             Name
           </label>
-          <input id="tpl-name" className="field" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} required autoFocus />
+          <input id="snip-name" className="field" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} required autoFocus placeholder="e.g. Follow us footer" />
         </div>
         <div>
-          <label htmlFor="tpl-body" className="label">
-            Message
+          <label htmlFor="snip-body" className="label">
+            Text
           </label>
-          <textarea id="tpl-body" className="field min-h-32 py-2.5" value={body} onChange={(e) => setBody(e.target.value)} maxLength={1000} required aria-describedby="tpl-help" aria-invalid={missingUrl} />
-          <p id="tpl-help" className={`mt-1.5 text-sm ${missingUrl ? 'text-bad' : 'text-muted'}`}>
-            {missingUrl ? 'Add {url} where the link should appear.' : 'Emoji and line breaks are fine.'}
-          </p>
+          <textarea id="snip-body" className="field font-message min-h-48 py-2.5" value={body} onChange={(e) => setBody(e.target.value)} maxLength={4000} required spellCheck={false} />
+          <p className="hint mt-1.5">Kept exactly as typed: emoji, styled letters and blank lines included.</p>
         </div>
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <button type="button" className="btn-quiet" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="btn-primary" disabled={busy || !name.trim() || missingUrl}>
+          <button type="submit" className="btn-primary" disabled={busy || !name.trim() || !body.trim()}>
             Save
           </button>
         </div>

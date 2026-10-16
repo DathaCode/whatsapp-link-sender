@@ -2,10 +2,10 @@ import { Check, CircleDashed, Clock, Loader2, Minus, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { api, errorMessage } from '../api';
-import { waitReasonText } from '../format';
+import { firstLines, waitReasonText } from '../format';
 import { useLive } from '../store';
 import type { ItemStatus, Job, SafetySettings } from '../types';
-import { PlatformIcon } from './PlatformIcon';
+import { JobThumb, jobText } from './JobThumb';
 
 const ITEM_ICON: Record<ItemStatus, { icon: typeof Check; cls: string; label: string }> = {
   pending: { icon: CircleDashed, cls: 'text-muted', label: 'Waiting' },
@@ -58,14 +58,14 @@ export function JobProgress({ job, settings }: { job: Job; settings: SafetySetti
   return (
     <section className="card p-4 sm:p-5" aria-labelledby={`job-${job.id}`}>
       <div className="flex items-start gap-3">
-        <PlatformIcon platform={job.platform} size={28} />
+        <JobThumb job={job} />
         <div className="min-w-0 flex-1">
           <h3 id={`job-${job.id}`} className="font-semibold" aria-live="polite">
             {headline}
           </h3>
-          <p className="truncate text-sm text-muted">
-            {job.url}
-            {isAdmin && <span> · by {job.username}</span>}
+          <p className="font-message truncate text-sm text-muted">
+            {firstLines(jobText(job), 1)}
+            {isAdmin && <span className="font-sans"> · by {job.username}</span>}
           </p>
         </div>
         {!finished && (

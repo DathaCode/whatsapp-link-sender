@@ -72,34 +72,34 @@ describe('audit log coverage', () => {
 
     // ---- settings (before stubbing them for fast sending) ----
     await admin.put('/api/admin/settings', { dailyCap: 100 });
-    const safety: SafetySettings = { minDelaySeconds: 0, maxDelaySeconds: 0, dailyCap: 100, windowStart: '00:00', windowEnd: '23:59' };
+    const safety: SafetySettings = { minDelaySeconds: 0, maxDelaySeconds: 0, imageMinDelaySeconds: 0, imageMaxDelaySeconds: 0, imageSendMode: 'single', dailyCap: 100, windowStart: '00:00', windowEnd: '23:59' };
     h.svc.settings.get = () => safety;
     h.svc.queue.start();
 
     // ---- sending ----
-    await u.client.post('/api/jobs', { url: 'not a link', groupIds: ['111@g.us'], presetIds: [p.id] }); // invalid_url
-    await u.client.post('/api/jobs', { url: 'https://youtu.be/x', groupIds: ['333@g.us'], presetIds: [] }); // no_permission? (333 is in preset now)
+    await u.client.post('/api/jobs', { text: '   ', groupIds: ['111@g.us'], presetIds: [p.id] }); // empty_message
+    await u.client.post('/api/jobs', { text: 'New post 👉 https://youtu.be/x', groupIds: ['333@g.us'], presetIds: [] }); // no_permission? (333 is in preset now)
     h.world.failFor.add('222@g.us');
-    const ok = await u.client.post('/api/jobs', { url: 'https://youtu.be/first', groupIds: ['111@g.us', '222@g.us'], presetIds: [p.id] });
+    const ok = await u.client.post('/api/jobs', { text: 'New post 👉 https://youtu.be/first', groupIds: ['111@g.us', '222@g.us'], presetIds: [p.id] });
     expect(ok.status).toBe(201);
     await waitFor(() => h.svc.jobs.get(ok.body.job.id)!.status === 'done');
-    const dup = await u.client.post('/api/jobs', { url: 'https://youtu.be/first', groupIds: ['111@g.us'], presetIds: [p.id] });
+    const dup = await u.client.post('/api/jobs', { text: 'New post 👉 https://youtu.be/first', groupIds: ['111@g.us'], presetIds: [p.id] });
     expect(dup.status).toBe(409);
-    const confirmed = await u.client.post('/api/jobs', { url: 'https://youtu.be/first', groupIds: ['111@g.us'], presetIds: [p.id], confirmDuplicate: true });
+    const confirmed = await u.client.post('/api/jobs', { text: 'New post 👉 https://youtu.be/first', groupIds: ['111@g.us'], presetIds: [p.id], confirmDuplicate: true });
     expect(confirmed.status).toBe(201);
     await waitFor(() => h.svc.jobs.get(confirmed.body.job.id)!.status === 'done');
 
     // outside hours → waits → cancel
     safety.windowStart = '00:00';
     safety.windowEnd = '00:01';
-    const later = await u.client.post('/api/jobs', { url: 'https://youtu.be/later', groupIds: ['111@g.us'], presetIds: [p.id] });
+    const later = await u.client.post('/api/jobs', { text: 'New post 👉 https://youtu.be/later', groupIds: ['111@g.us'], presetIds: [p.id] });
     h.svc.queue.kick();
     await waitFor(() => h.svc.jobs.get(later.body.job.id)!.status === 'waiting');
     await u.client.post(`/api/jobs/${later.body.job.id}/cancel`);
     // daily cap → waits
     safety.windowEnd = '23:59';
     safety.dailyCap = 1;
-    const capped = await admin.post('/api/jobs', { url: 'https://youtu.be/cap', groupIds: ['111@g.us'] });
+    const capped = await admin.post('/api/jobs', { text: 'New post 👉 https://youtu.be/cap', groupIds: ['111@g.us'] });
     h.svc.queue.kick();
     await waitFor(() => h.svc.jobs.get(capped.body.job.id)!.waitReason === 'daily_cap');
     await admin.post(`/api/jobs/${capped.body.job.id}/cancel`);
@@ -121,7 +121,7 @@ describe('audit log coverage', () => {
     await tick();
     // the active number gets logged out → sending paused → a user's send is blocked
     runtimeFor(clientIdOf(c2)).emit('logged_out', { reason: 'WhatsApp logged this number out (LOGOUT)', suspectedBan: false });
-    const paused = await u.client.post('/api/jobs', { url: 'https://youtu.be/paused', groupIds: ['111@g.us'], presetIds: [p.id] });
+    const paused = await u.client.post('/api/jobs', { text: 'New post 👉 https://youtu.be/paused', groupIds: ['111@g.us'], presetIds: [p.id] });
     expect(paused.status).toBe(503);
     expect(paused.body.error).toMatch(/contact your admin/);
     // admin switches back to number one, which then reports a ban
@@ -149,7 +149,7 @@ describe('audit log coverage', () => {
     expect(missing).toEqual([]);
 
     const blockedReasons = new Set(h.actions().filter((r) => r.action === 'send.blocked').map((r) => r.reason));
-    for (const reason of ['invalid_url', 'duplicate', 'outside_hours', 'daily_cap', 'connection_down']) {
+    for (const reason of ['empty_message', 'duplicate', 'outside_hours', 'daily_cap', 'connection_down']) {
       expect(blockedReasons, reason).toContain(reason);
     }
 

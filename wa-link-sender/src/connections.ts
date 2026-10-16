@@ -10,6 +10,7 @@ import { badRequest, conflict, notFound } from './errors.js';
 import type { Logger } from './logger.js';
 import { localTime } from './time.js';
 import { classifyGroups, type GroupInfo, type RawChat } from './groups.js';
+import type { SendMode } from './jobs.js';
 import { NotConnectedError, sessionDirFor, type WaRuntimeState } from './whatsapp.js';
 
 /** What the manager needs from a running WhatsApp client (WaClient in production, a fake in tests). */
@@ -26,7 +27,7 @@ export interface WaRuntime extends EventEmitter {
   listGroups(): Promise<GroupInfo[]>;
   /** Raw per-chat metadata for diagnostics (fresh from WhatsApp). */
   inspectChats(fresh: boolean): Promise<RawChat[]>;
-  sendText(groupId: string, text: string): Promise<void>;
+  sendPost(groupId: string, post: { text: string; imagePath: string | null; mode: SendMode }): Promise<void>;
 }
 export type RuntimeFactory = (clientId: string) => WaRuntime;
 
@@ -152,11 +153,11 @@ export class ConnectionManager extends EventEmitter {
     });
   }
 
-  /** Messages attempted today by a connection (sent, failed and in-flight count against its cap). */
+  /** WhatsApp messages attempted today by a connection (sent, failed and in-flight count; an image+text pair counts 2). */
   usageToday(connectionId: number): number {
     const today = localTime(new Date(), this.cfg.TZ).day;
     const r = this.db
-      .select({ n: sql<number>`count(*)` })
+      .select({ n: sql<number>`coalesce(sum(${sendResults.messagesCount}), 0)` })
       .from(sendResults)
       .where(
         and(
@@ -608,12 +609,12 @@ export class ConnectionManager extends EventEmitter {
     return { summary, chats: rows.filter((r) => r.isGroup), others: rows.filter((r) => !r.isGroup).length, unjoined: extra };
   }
 
-  /** Sends through the active number; returns the connection id used. */
-  async sendText(groupId: string, text: string): Promise<number> {
+  /** Sends one post through the active number; returns the connection id used. */
+  async sendPost(groupId: string, post: { text: string; imagePath: string | null; mode: SendMode }): Promise<number> {
     const a = this.active();
     const rt = this.activeRuntime();
     if (!a || !rt || !rt.isReady()) throw new NotConnectedError();
-    await rt.sendText(groupId, text);
+    await rt.sendPost(groupId, post);
     return a.id;
   }
 

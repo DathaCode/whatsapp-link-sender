@@ -7,6 +7,9 @@ import { ZodError } from 'zod';
 import type { AuditLog } from '../audit.js';
 import type { Backups } from '../backups.js';
 import type { Catalog } from '../catalog.js';
+import type { Composer } from '../compose.js';
+import type { Drafts } from '../drafts.js';
+import { MAX_IMAGE_BYTES, type Images } from '../images.js';
 import { SESSION_COOKIE, CSRF_HEADER, type SessionStore } from '../auth/sessions.js';
 import type { Config } from '../config.js';
 import type { ConnectionManager } from '../connections.js';
@@ -33,6 +36,9 @@ export interface Deps {
   users: UserService;
   connections: ConnectionManager;
   catalog: Catalog;
+  composer: Composer;
+  images: Images;
+  drafts: Drafts;
   settings: Settings;
   jobs: JobStore;
   queue: SendQueue;
@@ -85,7 +91,9 @@ export function createApp(d: Deps) {
       strictTransportSecurity: false, // set by the HTTPS proxy when there is one
     }),
   );
-  app.use(express.json({ limit: '200kb' }));
+  app.use(express.json({ limit: '1mb' }));
+  // Image uploads arrive as the raw file (5 MB max; a little headroom so the friendly size error comes from Images).
+  app.use('/api/uploads', express.raw({ type: 'application/octet-stream', limit: MAX_IMAGE_BYTES + 64 * 1024 }));
 
   app.use((req, res, next) => {
     const start = Date.now();
@@ -113,7 +121,8 @@ export function createApp(d: Deps) {
         return;
       }
     }
-    if (req.headers['content-length'] && req.headers['content-length'] !== '0' && !req.is('application/json')) {
+    const rawUpload = req.path === '/uploads' && req.is('application/octet-stream');
+    if (!rawUpload && req.headers['content-length'] && req.headers['content-length'] !== '0' && !req.is('application/json')) {
       res.status(415).json({ error: 'Send JSON.' });
       return;
     }
@@ -184,6 +193,10 @@ export function createApp(d: Deps) {
     }
     if (err instanceof NotConnectedError) {
       res.status(503).json({ error: 'WhatsApp is not connected right now. Check the Connections page.', code: 'not_connected' });
+      return;
+    }
+    if (err && typeof err === 'object' && (err as { type?: string }).type === 'entity.too.large') {
+      res.status(413).json({ error: req.path.startsWith('/api/uploads') ? 'The image is larger than 5 MB. Use a smaller image.' : 'That request is too large.', code: 'too_large' });
       return;
     }
     if (err instanceof SyntaxError && 'body' in err) {

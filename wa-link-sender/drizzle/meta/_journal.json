@@ -22,6 +22,20 @@
       "when": 1792154627109,
       "tag": "0002_group_communities",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1792171485152,
+      "tag": "0003_message_composer",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792171486935,
+      "tag": "0004_drop_templates",
+      "breakpoints": true
     }
   ]
 }

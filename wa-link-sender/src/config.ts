@@ -67,6 +67,8 @@ const schema = z
     // ---- audit & backups ----
     AUDIT_RETENTION_DAYS: intFromEnv('AUDIT_RETENTION_DAYS', 365, 30, 3650),
     BACKUP_KEEP: intFromEnv('BACKUP_KEEP', 14, 1, 365),
+    /** Attached images are deleted after this many days (history then shows "image expired"). */
+    UPLOAD_RETENTION_DAYS: intFromEnv('UPLOAD_RETENTION_DAYS', 90, 1, 3650),
 
     // ---- sending safety defaults (Settings page can override) ----
     MIN_DELAY_SECONDS: intFromEnv('MIN_DELAY_SECONDS', 15, 5, 3600),

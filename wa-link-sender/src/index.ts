@@ -46,7 +46,8 @@ try {
   console.error(`\n${e instanceof AppError ? e.message : String(e)}\n`);
   process.exit(1);
 }
-catalog.seedTemplates();
+catalog.seedSnippets();
+svc.jobs.backfillMainLinks();
 
 // Right after connecting, WhatsApp Web may not have synced chats yet: retry a few times.
 let groupLoadRun = 0;
@@ -81,7 +82,7 @@ audit.record(SYSTEM, { action: 'system.started', details: { version, node: proce
 
 connections.boot();
 queue.start();
-const scheduler = new Scheduler(cfg, svc.db, backups, audit, log.child({ mod: 'scheduler' }));
+const scheduler = new Scheduler(cfg, svc.db, backups, audit, svc.images, log.child({ mod: 'scheduler' }));
 scheduler.start();
 
 let shuttingDown = false;

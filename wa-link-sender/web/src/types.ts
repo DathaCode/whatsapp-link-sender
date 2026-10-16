@@ -45,6 +45,9 @@ export interface Usage {
 export interface SafetySettings {
   minDelaySeconds: number;
   maxDelaySeconds: number;
+  imageMinDelaySeconds: number;
+  imageMaxDelaySeconds: number;
+  imageSendMode: 'single' | 'two';
   dailyCap: number;
   windowStart: string;
   windowEnd: string;
@@ -72,11 +75,55 @@ export interface Preset {
   groups: PresetGroup[];
   userIds?: number[];
 }
-export interface Template {
+export interface Snippet {
   id: number;
   name: string;
   body: string;
-  active: boolean;
+}
+export interface MessageLink {
+  original: string;
+  cleaned: string;
+  host: string;
+}
+export interface AnalyzedLink extends MessageLink {
+  allowed: boolean;
+  /** Counts for duplicate detection (not a footer/repeating link). */
+  main: boolean;
+}
+export interface ImageInfo {
+  id: string;
+  originalName: string;
+  originalSize: number;
+  originalType: string;
+  originalSha256: string;
+  processedSha256: string;
+  size: number;
+  width: number;
+  height: number;
+}
+export type SendMode = 'text' | 'single' | 'two';
+export interface Duplicate {
+  jobId: number;
+  at: number;
+  groups: number;
+  by: string;
+  reasons: string[];
+}
+/** What /api/messages/check returns: exactly what would be sent, with every server check. */
+export interface Analysis {
+  text: string;
+  sha256: string;
+  chars: number;
+  limit: number;
+  tooLong: boolean;
+  empty: boolean;
+  links: AnalyzedLink[];
+  disallowed: string[];
+  mainLinks: string[];
+  mode: SendMode;
+  image: ImageInfo | null;
+  imageError: string | null;
+  duplicate: Duplicate | null;
 }
 export interface JobItem {
   id: number;
@@ -91,9 +138,18 @@ export interface Job {
   id: number;
   userId: number;
   username: string;
+  /** Old jobs: the post URL. New jobs: the first main link (may be ''). */
   url: string;
-  platform: Platform;
-  templateId: number | null;
+  /** Old jobs: facebook | tiktok | youtube. New jobs: 'message'. */
+  platform: string;
+  messageText: string | null;
+  messageSha256: string | null;
+  imageId: string | null;
+  imageSha256: string | null;
+  sendMode: SendMode | null;
+  links: MessageLink[];
+  warnings: Record<string, unknown> | null;
+  connectionLabel: string | null;
   presetIds: number[];
   status: JobStatus;
   waitReason: WaitReason;
@@ -111,19 +167,14 @@ export interface SendOptions {
   isAdmin: boolean;
   presets: Preset[];
   groups: Group[];
-  templates: Template[];
+  snippets: Snippet[];
+  allowedDomains: string[];
+  limits: { text: number; caption: number; imageBytes: number };
   settings: SafetySettings;
   usage: Usage;
   sending: SendingStatus;
   queue: QueueStatus;
   timeZone: string;
-}
-export interface LinkCheck {
-  ok: boolean;
-  error?: string;
-  url?: string;
-  platform?: Platform;
-  previous?: { jobId: number; at: number; groups: number; by: string } | null;
 }
 export interface UserView {
   id: number;
@@ -174,4 +225,9 @@ export interface AuditRow {
   reason: string | null;
   details: string | null;
   connectionId: number | null;
+}
+
+export interface MessagingSettings {
+  allowedDomains: string[];
+  repeatingLinks: string[];
 }

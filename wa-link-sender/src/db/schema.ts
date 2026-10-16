@@ -151,14 +151,6 @@ export const presetAccess = sqliteTable(
   (t) => [primaryKey({ columns: [t.userId, t.presetId] })],
 );
 
-export const templates = sqliteTable('templates', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  name: text('name').notNull(),
-  body: text('body').notNull(),
-  active: integer('active', { mode: 'boolean' }).notNull().default(true),
-  updatedAt: integer('updated_at').notNull(),
-});
-
 export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
   value: text('value').notNull(), // JSON
@@ -176,9 +168,25 @@ export const jobs = sqliteTable(
     userId: integer('user_id')
       .notNull()
       .references(() => users.id),
+    /** v2 jobs: the single post URL. v3+: the first main link (or '') — kept so old history stays readable. */
     url: text('url').notNull(),
+    /** v2 jobs: facebook | tiktok | youtube. v3+: 'message'. */
     platform: text('platform').notNull(),
+    /** v2 jobs only (templates were removed). */
     templateId: integer('template_id'),
+    /** Exact text that is sent (after tracking-parameter cleanup). Null for v2 jobs. */
+    messageText: text('message_text'),
+    messageSha256: text('message_sha256'),
+    /** Whitespace-collapsed hash, for duplicate detection only. */
+    textKey: text('text_key'),
+    imageId: text('image_id'),
+    imageSha256: text('image_sha256'),
+    /** text | single (image + caption) | two (image, then text) */
+    sendMode: text('send_mode', { enum: ['text', 'single', 'two'] }),
+    /** JSON [{original, cleaned, host}] */
+    links: text('links'),
+    /** JSON: warnings shown at request time and how they were resolved. */
+    warnings: text('warnings'),
     presetIds: text('preset_ids').notNull().default('[]'), // JSON number[]
     status: text('status', { enum: JOB_STATUSES }).notNull(),
     waitReason: text('wait_reason', { enum: WAIT_REASONS }),
@@ -189,7 +197,25 @@ export const jobs = sqliteTable(
     finishedAt: integer('finished_at'),
     cancelledBy: integer('cancelled_by').references(() => users.id),
   },
-  (t) => [index('jobs_status_idx').on(t.status), index('jobs_url_idx').on(t.url), index('jobs_user_idx').on(t.userId)],
+  (t) => [
+    index('jobs_status_idx').on(t.status),
+    index('jobs_url_idx').on(t.url),
+    index('jobs_user_idx').on(t.userId),
+    index('jobs_text_key_idx').on(t.textKey),
+    index('jobs_image_sha_idx').on(t.imageSha256),
+  ],
+);
+
+/** Canonical "main" links of each send (footer/repeating links excluded), for duplicate detection. */
+export const jobMainLinks = sqliteTable(
+  'job_main_links',
+  {
+    jobId: integer('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    link: text('link').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.jobId, t.link] }), index('job_main_links_link_idx').on(t.link)],
 );
 
 export const RESULT_STATUSES = ['pending', 'sending', 'sent', 'failed', 'cancelled'] as const;
@@ -211,6 +237,9 @@ export const sendResults = sqliteTable(
     connectionId: integer('connection_id').references(() => connections.id),
     attemptedAt: integer('attempted_at'),
     day: text('day'), // YYYY-MM-DD in TZ, for the per-connection daily cap
+    /** WhatsApp messages this result costs against the daily cap (2 in two-message image mode). */
+    messagesCount: integer('messages_count').notNull().default(1),
+    attempts: integer('attempts').notNull().default(0),
     auditId: integer('audit_id').references(() => auditLog.id),
   },
   (t) => [
@@ -253,3 +282,44 @@ export const auditLog = sqliteTable(
     index('audit_outcome_idx').on(t.outcome, t.ts),
   ],
 );
+
+/** Images attached to messages. Files live in DATA_DIR/uploads/<id>.jpg (re-encoded, metadata stripped). */
+export const uploads = sqliteTable(
+  'uploads',
+  {
+    id: text('id').primaryKey(), // random hex, also the file name
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    originalName: text('original_name').notNull(),
+    originalSize: integer('original_size').notNull(),
+    originalType: text('original_type').notNull(), // detected from content: jpeg | png | webp
+    originalSha256: text('original_sha256').notNull(),
+    size: integer('size').notNull(),
+    width: integer('width').notNull(),
+    height: integer('height').notNull(),
+    sha256: text('sha256').notNull(), // of the processed JPEG
+    createdAt: integer('created_at').notNull(),
+    deletedAt: integer('deleted_at'),
+  },
+  (t) => [index('uploads_created_idx').on(t.createdAt), index('uploads_orig_sha_idx').on(t.originalSha256)],
+);
+
+/** Autosaved message draft, one per user. */
+export const drafts = sqliteTable('drafts', {
+  userId: integer('user_id')
+    .primaryKey()
+    .references(() => users.id),
+  text: text('text').notNull().default(''),
+  uploadId: text('upload_id'),
+  updatedAt: integer('updated_at').notNull(),
+});
+
+/** Reusable text blocks (e.g. the FOLLOW US footer), managed by admins. */
+export const snippets = sqliteTable('snippets', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  body: text('body').notNull(),
+  sort: integer('sort').notNull().default(0),
+  updatedAt: integer('updated_at').notNull(),
+});

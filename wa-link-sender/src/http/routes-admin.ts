@@ -16,18 +16,17 @@ const presetBody = z.object({
   name: z.string().trim().min(1, 'Give the preset a name.').max(60, 'Keep the name under 60 characters.'),
   groups: z.array(groupRef).max(1000),
 });
-const templateBody = z.object({
-  name: z.string().trim().min(1, 'Give the template a name.').max(60, 'Keep the name under 60 characters.'),
+const snippetBody = z.object({
+  name: z.string().trim().min(1, 'Give the snippet a name.').max(60, 'Keep the name under 60 characters.'),
+  // Plain text, kept exactly as typed (only CRLF → LF and outer whitespace trimmed).
   body: z
     .string()
-    .trim()
-    .min(1, 'The message cannot be empty.')
-    .max(1000, 'Keep the message under 1000 characters.')
-    .refine((b) => b.includes('{url}'), 'Put {url} where the link should go.'),
-  active: z.boolean().default(true),
+    .max(4000, 'Keep a snippet under 4000 characters.')
+    .transform((b) => b.replace(/\r\n?/g, '\n').replace(/^\s+|\s+$/g, ''))
+    .refine((b) => b.length > 0, 'The snippet cannot be empty.'),
 });
 
-export const AUDIT_CATEGORIES = ['auth', 'access', 'user', 'connection', 'group', 'preset', 'template', 'settings', 'send', 'system'] as const;
+export const AUDIT_CATEGORIES = ['auth', 'access', 'user', 'connection', 'group', 'preset', 'snippet', 'upload', 'settings', 'send', 'system'] as const;
 
 const auditQuery = z.object({
   from: z.coerce.number().int().optional(),
@@ -207,29 +206,41 @@ export function adminRoutes(d: Deps): RouteDef[] {
       res.json({ presets: catalog.listPresets() });
     }),
 
-    // ---------------- templates ----------------
-    route('get', '/api/admin/templates', 'admin', (_req, res) => {
-      res.json({ templates: catalog.listTemplates() });
+    // ---------------- snippets ----------------
+    route('get', '/api/admin/snippets', 'admin', (_req, res) => {
+      res.json({ snippets: catalog.listSnippets() });
     }),
-    route('post', '/api/admin/templates', 'admin', (req, res) => {
-      res.status(201).json({ templates: catalog.createTemplate(ctxOf(req), templateBody.parse(req.body)) });
+    route('post', '/api/admin/snippets', 'admin', (req, res) => {
+      res.status(201).json({ snippets: catalog.createSnippet(ctxOf(req), snippetBody.parse(req.body)) });
     }),
-    route('put', '/api/admin/templates/:id', 'admin', (req, res) => {
-      res.json({ templates: catalog.updateTemplate(ctxOf(req), idParam.parse(req.params.id), templateBody.parse(req.body)) });
+    route('put', '/api/admin/snippets/:id', 'admin', (req, res) => {
+      res.json({ snippets: catalog.updateSnippet(ctxOf(req), idParam.parse(req.params.id), snippetBody.parse(req.body)) });
     }),
-    route('delete', '/api/admin/templates/:id', 'admin', (req, res) => {
-      res.json({ templates: catalog.deleteTemplate(ctxOf(req), idParam.parse(req.params.id)) });
+    route('delete', '/api/admin/snippets/:id', 'admin', (req, res) => {
+      res.json({ snippets: catalog.deleteSnippet(ctxOf(req), idParam.parse(req.params.id)) });
     }),
 
     // ---------------- settings ----------------
     route('get', '/api/admin/settings', 'admin', (_req, res) => {
-      res.json({ settings: d.settings.get(), defaults: d.settings.defaults(), timeZone: d.cfg.TZ, auditRetentionDays: d.cfg.AUDIT_RETENTION_DAYS, backupKeep: d.cfg.BACKUP_KEEP });
+      res.json({
+        settings: d.settings.get(),
+        defaults: d.settings.defaults(),
+        messaging: d.settings.messaging(),
+        messagingDefaults: d.settings.messagingDefaults(),
+        timeZone: d.cfg.TZ,
+        auditRetentionDays: d.cfg.AUDIT_RETENTION_DAYS,
+        uploadRetentionDays: d.cfg.UPLOAD_RETENTION_DAYS,
+        backupKeep: d.cfg.BACKUP_KEEP,
+      });
     }),
     route('put', '/api/admin/settings', 'admin', (req, res) => {
       const settings = d.settings.update(ctxOf(req), req.body);
       d.queue.kick();
       d.hub.all('usage', d.queue.usage());
       res.json({ settings });
+    }),
+    route('put', '/api/admin/settings/messaging', 'admin', (req, res) => {
+      res.json({ messaging: d.settings.updateMessaging(ctxOf(req), req.body) });
     }),
     route('post', '/api/admin/settings/reset', 'admin', (req, res) => {
       const settings = d.settings.reset(ctxOf(req));

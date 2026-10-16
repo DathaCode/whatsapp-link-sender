@@ -2,16 +2,23 @@ import type { ConnectionStatus, PauseReason, Platform, SafetySettings, WaitReaso
 
 export const PLATFORM_NAME: Record<Platform, string> = { facebook: 'Facebook', tiktok: 'TikTok', youtube: 'YouTube' };
 
-export function renderTemplate(body: string, url: string): string {
-  return body.includes('{url}') ? body.replaceAll('{url}', url) : `${body.trim()}\n${url}`.trim();
+/** Rough send time: pauses between groups (average) plus ~4 s per message for typing and sending. */
+export function estimateSeconds(groups: number, s: SafetySettings, withImage = false): number {
+  if (groups <= 0) return 0;
+  const avgPause = withImage ? (s.imageMinDelaySeconds + s.imageMaxDelaySeconds) / 2 : (s.minDelaySeconds + s.maxDelaySeconds) / 2;
+  return Math.round((groups - 1) * avgPause + groups * (withImage ? 8 : 4));
 }
 
-/** Rough send time: pauses between groups (average) plus ~4 s per message for typing and sending. */
-export function estimateSeconds(groups: number, s: SafetySettings): number {
-  if (groups <= 0) return 0;
-  const avgPause = (s.minDelaySeconds + s.maxDelaySeconds) / 2;
-  return Math.round((groups - 1) * avgPause + groups * 4);
+/** First non-empty lines of a message, for lists. */
+export function firstLines(text: string, n = 2): string {
+  return text
+    .split('\n')
+    .filter((l) => l.trim())
+    .slice(0, n)
+    .join('\n');
 }
+
+export const formatBytes = (b: number) => (b < 1024 * 1024 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1024 / 1024).toFixed(1)} MB`);
 
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.max(1, Math.round(seconds))} sec`;

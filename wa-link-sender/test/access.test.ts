@@ -98,7 +98,7 @@ describe('role enforcement on every route', () => {
     const p = await admin.post('/api/admin/presets', { name: 'P', groups: [{ id: '111@g.us', name: 'Alpha group' }] });
     const a = await h.makeUser(admin, 'anna', [p.body.preset.id]);
     const b = await h.makeUser(admin, 'ben', [p.body.preset.id]);
-    const sent = await a.client.post('/api/jobs', { url: 'https://youtu.be/abc', groupIds: ['111@g.us'], presetIds: [p.body.preset.id] });
+    const sent = await a.client.post('/api/jobs', { text: 'New post 👉 https://youtu.be/abc', groupIds: ['111@g.us'], presetIds: [p.body.preset.id] });
     expect(sent.status).toBe(201);
     const jobId = sent.body.job.id;
 

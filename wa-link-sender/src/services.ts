@@ -2,6 +2,9 @@ import { AuditLog, SYSTEM } from './audit.js';
 import { SessionStore } from './auth/sessions.js';
 import { Backups } from './backups.js';
 import { Catalog } from './catalog.js';
+import { Composer } from './compose.js';
+import { Drafts } from './drafts.js';
+import { Images } from './images.js';
 import type { Config } from './config.js';
 import { ConnectionManager, type RuntimeFactory } from './connections.js';
 import { openDatabase } from './db/index.js';
@@ -27,6 +30,9 @@ export function createServices(cfg: Config, log: Logger, opts: { runtimeFactory?
   const catalog = new Catalog(db, audit);
   const settings = new Settings(cfg, db, audit);
   const jobs = new JobStore(db);
+  const images = new Images(db, cfg.DATA_DIR, audit);
+  const drafts = new Drafts(db);
+  const composer = new Composer(settings, catalog, images, jobs);
   const runtimeFactory: RuntimeFactory =
     opts.runtimeFactory ?? ((clientId) => new WaClient(clientId, cfg, log.child({ mod: 'whatsapp' })));
   const connections = new ConnectionManager(db, audit, cfg, log.child({ mod: 'connections' }), runtimeFactory);
@@ -40,7 +46,7 @@ export function createServices(cfg: Config, log: Logger, opts: { runtimeFactory?
     cfg,
     jobs,
     connections,
-    catalog,
+    images,
     settings,
     audit,
     log.child({ mod: 'queue' }),
@@ -59,7 +65,7 @@ export function createServices(cfg: Config, log: Logger, opts: { runtimeFactory?
     queue.kick();
   });
 
-  return { database, db, sqlite, audit, hub, sessions, users, catalog, settings, jobs, connections, queue, backups };
+  return { database, db, sqlite, audit, hub, sessions, users, catalog, composer, images, drafts, settings, jobs, connections, queue, backups };
 }
 
 export type Services = ReturnType<typeof createServices>;

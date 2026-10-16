@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, ne, sql, type SQL } from 'drizzle-orm';
 import type { Db } from './db/index.js';
-import { jobs, sendResults, users, type JobStatus, type ResultStatus, type WaitReason } from './db/schema.js';
-import type { Platform } from './urls.js';
+import { connections, jobMainLinks, jobs, sendResults, users, type JobStatus, type ResultStatus, type WaitReason } from './db/schema.js';
+import { canonicalLink, type MessageLink } from './message.js';
 
 export interface JobItem {
   id: number;
@@ -13,13 +13,25 @@ export interface JobItem {
   connectionId: number | null;
 }
 
+export type SendMode = 'text' | 'single' | 'two';
+
 export interface Job {
   id: number;
   userId: number;
   username: string;
+  /** v2 jobs: the post URL. New jobs: first main link (may be ''). */
   url: string;
-  platform: Platform;
-  templateId: number | null;
+  /** v2 jobs: facebook | tiktok | youtube. New jobs: 'message'. */
+  platform: string;
+  /** Exact text sent (null for v2 jobs: see items[].message). */
+  messageText: string | null;
+  messageSha256: string | null;
+  imageId: string | null;
+  imageSha256: string | null;
+  sendMode: SendMode | null;
+  links: MessageLink[];
+  warnings: Record<string, unknown> | null;
+  connectionLabel: string | null;
   presetIds: number[];
   status: JobStatus;
   waitReason: WaitReason;
@@ -41,25 +53,69 @@ const counts = {
   pending: sql<number>`(select count(*) from send_results r where r.job_id = ${jobs.id} and r.status in ('pending','sending'))`,
 };
 
+export interface NewJob {
+  userId: number;
+  messageText: string;
+  messageSha256: string;
+  textKey: string;
+  imageId: string | null;
+  imageSha256: string | null;
+  sendMode: SendMode;
+  links: MessageLink[];
+  mainLinks: string[];
+  warnings: Record<string, unknown> | null;
+  presetIds: number[];
+  parentJobId: number | null;
+  requestedConnectionId: number | null;
+  groups: { id: string; name: string }[];
+}
+
 export class JobStore {
   constructor(private db: Db) {}
 
   private select(where: SQL | undefined) {
     return this.db
-      .select({ j: jobs, username: users.username, ...counts })
+      .select({ j: jobs, username: users.username, connectionLabel: connections.label, ...counts })
       .from(jobs)
       .innerJoin(users, eq(users.id, jobs.userId))
+      .leftJoin(connections, eq(connections.id, jobs.requestedConnectionId))
       .where(where);
   }
 
-  private toJob(r: { j: typeof jobs.$inferSelect; username: string; total: number; sent: number; failed: number; pending: number }): Job {
+  /** Old (pre-message) jobs: index their URL as a main link once, so duplicate checks still see them. */
+  backfillMainLinks() {
+    const old = this.db
+      .select({ id: jobs.id, url: jobs.url })
+      .from(jobs)
+      .where(sql`${jobs.messageText} IS NULL AND ${jobs.url} != '' AND NOT EXISTS (SELECT 1 FROM job_main_links m WHERE m.job_id = ${jobs.id})`)
+      .all();
+    for (const j of old) this.db.insert(jobMainLinks).values({ jobId: j.id, link: canonicalLink(j.url) }).onConflictDoNothing().run();
+    return old.length;
+  }
+
+  private toJob(r: {
+    j: typeof jobs.$inferSelect;
+    username: string;
+    connectionLabel: string | null;
+    total: number;
+    sent: number;
+    failed: number;
+    pending: number;
+  }): Job {
     return {
       id: r.j.id,
       userId: r.j.userId,
       username: r.username,
       url: r.j.url,
-      platform: r.j.platform as Platform,
-      templateId: r.j.templateId,
+      platform: r.j.platform,
+      messageText: r.j.messageText,
+      messageSha256: r.j.messageSha256,
+      imageId: r.j.imageId,
+      imageSha256: r.j.imageSha256,
+      sendMode: r.j.sendMode,
+      links: r.j.links ? (JSON.parse(r.j.links) as MessageLink[]) : [],
+      warnings: r.j.warnings ? (JSON.parse(r.j.warnings) as Record<string, unknown>) : null,
+      connectionLabel: r.connectionLabel,
       presetIds: JSON.parse(r.j.presetIds) as number[],
       status: r.j.status,
       waitReason: r.j.waitReason,
@@ -74,24 +130,24 @@ export class JobStore {
     };
   }
 
-  create(input: {
-    userId: number;
-    url: string;
-    platform: Platform;
-    templateId: number | null;
-    presetIds: number[];
-    parentJobId: number | null;
-    requestedConnectionId: number | null;
-    groups: { id: string; name: string }[];
-  }): number {
+  create(input: NewJob): number {
+    const firstMain = input.mainLinks[0];
+    const url = firstMain ? (input.links.find((l) => canonicalLink(l.cleaned) === firstMain)?.cleaned ?? '') : '';
     return this.db.transaction((tx) => {
       const j = tx
         .insert(jobs)
         .values({
           userId: input.userId,
-          url: input.url,
-          platform: input.platform,
-          templateId: input.templateId,
+          url,
+          platform: 'message',
+          messageText: input.messageText,
+          messageSha256: input.messageSha256,
+          textKey: input.textKey,
+          imageId: input.imageId,
+          imageSha256: input.imageSha256,
+          sendMode: input.sendMode,
+          links: JSON.stringify(input.links),
+          warnings: input.warnings ? JSON.stringify(input.warnings) : null,
           presetIds: JSON.stringify(input.presetIds),
           status: 'queued',
           parentJobId: input.parentJobId,
@@ -101,10 +157,52 @@ export class JobStore {
         .returning({ id: jobs.id })
         .get();
       tx.insert(sendResults)
-        .values(input.groups.map((g) => ({ jobId: j.id, groupId: g.id, groupName: g.name, status: 'pending' as const })))
+        .values(
+          input.groups.map((g) => ({
+            jobId: j.id,
+            groupId: g.id,
+            groupName: g.name,
+            status: 'pending' as const,
+            messagesCount: input.sendMode === 'two' ? 2 : 1,
+          })),
+        )
         .run();
+      for (const link of new Set(input.mainLinks)) tx.insert(jobMainLinks).values({ jobId: j.id, link }).onConflictDoNothing().run();
       return j.id;
     });
+  }
+
+  /**
+   * The most recent earlier send that matches: same text (whitespace-insensitive), same image,
+   * or any shared main link. Cancelled sends don't count.
+   */
+  findDuplicate(q: { textKey: string; imageSha256: string | null; mainLinks: string[] }) {
+    const pick = (where: SQL) =>
+      this.select(and(where, ne(jobs.status, 'cancelled')))
+        .orderBy(desc(jobs.id))
+        .limit(1)
+        .get();
+    const found: { row: NonNullable<ReturnType<typeof pick>>; why: string }[] = [];
+    const byText = pick(eq(jobs.textKey, q.textKey));
+    if (byText) found.push({ row: byText, why: 'same message text' });
+    if (q.imageSha256) {
+      const byImage = pick(eq(jobs.imageSha256, q.imageSha256));
+      if (byImage) found.push({ row: byImage, why: 'same image' });
+    }
+    for (const link of q.mainLinks) {
+      const byLink = pick(sql`EXISTS (SELECT 1 FROM job_main_links m WHERE m.job_id = ${jobs.id} AND m.link = ${link})`);
+      if (byLink) found.push({ row: byLink, why: `same link: ${link}` });
+    }
+    if (!found.length) return undefined;
+    found.sort((a, b) => b.row.j.id - a.row.j.id);
+    const latest = found[0]!.row;
+    return {
+      jobId: latest.j.id,
+      at: latest.j.createdAt,
+      groups: Number(latest.sent),
+      by: latest.username,
+      reasons: [...new Set(found.map((f) => f.why))],
+    };
   }
 
   get(id: number): Job | undefined {
@@ -132,7 +230,7 @@ export class JobStore {
     if (opts.userId !== undefined) c.push(eq(jobs.userId, opts.userId));
     if (opts.search) {
       const q = `%${opts.search.replace(/[\\%_]/g, (ch) => '\\' + ch)}%`;
-      c.push(sql`${jobs.url} LIKE ${q} ESCAPE '\\'`);
+      c.push(sql`(${jobs.url} LIKE ${q} ESCAPE '\\' OR ${jobs.messageText} LIKE ${q} ESCAPE '\\')`);
     }
     return this.select(c.length ? and(...c) : undefined)
       .orderBy(desc(jobs.id))
@@ -148,14 +246,6 @@ export class JobStore {
       .orderBy(asc(jobs.id))
       .all()
       .map((r) => this.toJob(r));
-  }
-
-  lastSendOfUrl(url: string): { jobId: number; at: number; groups: number; by: string } | undefined {
-    const r = this.select(and(eq(jobs.url, url), ne(jobs.status, 'cancelled')))
-      .orderBy(desc(jobs.id))
-      .limit(1)
-      .get();
-    return r ? { jobId: r.j.id, at: r.j.createdAt, groups: Number(r.sent), by: r.username } : undefined;
   }
 
   setStatus(id: number, status: JobStatus, waitReason: WaitReason = null, cancelledBy?: number) {
@@ -193,10 +283,10 @@ export class JobStore {
       .get();
   }
 
-  markSending(itemId: number, message: string, day: string, connectionId: number) {
+  markSending(itemId: number, message: string, day: string, connectionId: number, messagesCount: number) {
     this.db
       .update(sendResults)
-      .set({ status: 'sending', message, attemptedAt: Date.now(), day, connectionId, error: null })
+      .set({ status: 'sending', message, attemptedAt: Date.now(), day, connectionId, error: null, messagesCount, attempts: sql`${sendResults.attempts} + 1` })
       .where(eq(sendResults.id, itemId))
       .run();
   }
@@ -274,6 +364,7 @@ export class JobStore {
         error: sendResults.error,
         attemptedAt: sendResults.attemptedAt,
         url: jobs.url,
+        messageText: jobs.messageText,
         username: users.username,
       })
       .from(sendResults)
