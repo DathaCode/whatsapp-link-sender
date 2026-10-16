@@ -33,8 +33,7 @@ export function GroupPicker({
     return (
       <div className="rounded-xl border border-dashed border-line p-6 text-center text-muted">
         <Users className="mx-auto mb-2 size-6" aria-hidden />
-        No groups yet. Once WhatsApp is connected, your groups appear here. You can also press “Refresh groups” on the
-        Connection tab.
+        No groups yet. They appear once a WhatsApp number is connected. Admins can also press “Refresh groups” on the Groups & Presets page.
       </div>
     );
   }

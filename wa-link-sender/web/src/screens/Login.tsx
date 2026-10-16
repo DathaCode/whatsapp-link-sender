@@ -1,6 +1,7 @@
 import { LogIn } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import { api, errorMessage, setCsrf } from '../api';
+import { AuthFrame } from '../components/AuthFrame';
 import type { Me } from '../types';
 
 export function Login({ onSignedIn, notice }: { onSignedIn: (me: Me) => void; notice?: string }) {
@@ -26,13 +27,12 @@ export function Login({ onSignedIn, notice }: { onSignedIn: (me: Me) => void; no
   };
 
   return (
-    <main className="grid min-h-dvh place-items-center px-4 py-10">
-      <form onSubmit={submit} className="card w-full max-w-sm p-6 sm:p-8" aria-labelledby="login-title">
-        <img src="/favicon.svg" alt="" className="mb-6 size-12" />
-        <h1 id="login-title" className="text-2xl font-bold tracking-tight">
-          Link Sender
+    <AuthFrame>
+      <form onSubmit={submit} className="card p-6 sm:p-8" aria-labelledby="login-title">
+        <h1 id="login-title" className="text-2xl font-semibold tracking-tight">
+          Sign in
         </h1>
-        <p className="mt-1 mb-6 text-muted">Sign in to share posts to your WhatsApp groups.</p>
+        <p className="mt-1 mb-6 text-muted">Share your Facebook, TikTok and YouTube posts to your WhatsApp groups.</p>
         {notice && (
           <p role="status" className="mb-4 rounded-xl bg-warn-soft px-3 py-2 text-sm text-warn">
             {notice}
@@ -77,6 +77,6 @@ export function Login({ onSignedIn, notice }: { onSignedIn: (me: Me) => void; no
         </button>
         <p className="hint mt-4 text-center">Forgot your password? Ask your admin to reset it.</p>
       </form>
-    </main>
+    </AuthFrame>
   );
 }

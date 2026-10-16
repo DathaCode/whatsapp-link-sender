@@ -1,51 +1,72 @@
 @import 'tailwindcss';
-@import '@fontsource-variable/figtree';
-
-/* One accent (persimmon) on warm neutrals. Dark mode follows the system setting. */
+/*
+ * WhatsApp-inspired palette (WhatsApp Web light & dark). Dark mode follows the system setting.
+ * Accent text/buttons use WhatsApp's teal (#008069) in light mode for contrast; #00a884 in dark.
+ */
 :root {
-  --bg: #f6f4f1;
+  --bg: #f0f2f5;
   --surface: #ffffff;
-  --surface-2: #f0ece7;
-  --ink: #1c1917;
-  --muted: #625a52;
-  --line: #e3ddd6;
-  --accent: #c2410c;
-  --accent-hover: #a8380a;
+  --surface-2: #f0f2f5;
+  --ink: #111b21;
+  --muted: #54656f;
+  --line: #e9edef;
+  --accent: #008069;
+  --accent-hover: #017561;
   --accent-ink: #ffffff;
-  --accent-soft: #fdede4;
-  --ok: #15803d;
-  --ok-soft: #e7f5ec;
-  --warn: #a14c06;
-  --warn-soft: #fdf2e0;
-  --bad: #b91c1c;
-  --bad-soft: #fdeaea;
+  --accent-soft: #d9fdd3;
+  --brand: #25d366;
+  --rail: #f0f2f5;
+  --topbar: #008069;
+  --topbar-ink: #ffffff;
+  --wallpaper: #efeae2;
+  --wallpaper-dot: rgba(17, 27, 33, 0.06);
+  --bubble-out: #d9fdd3;
+  --bubble-in: #ffffff;
+  --tick: #53bdeb;
+  --ok: #008069;
+  --ok-soft: #d8f5e6;
+  --warn: #8a5300;
+  --warn-soft: #fff3d6;
+  --bad: #d4002f;
+  --bad-soft: #ffe5ea;
+  --shadow: 0 1px 3px rgba(11, 20, 26, 0.08), 0 1px 2px rgba(11, 20, 26, 0.04);
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #141210;
-    --surface: #1d1a17;
-    --surface-2: #27231f;
-    --ink: #f3efe9;
-    --muted: #aaa096;
-    --line: #38322c;
-    --accent: #fb8a4c;
-    --accent-hover: #fd9d68;
-    --accent-ink: #1a0d05;
-    --accent-soft: #3a2216;
-    --ok: #4ade80;
-    --ok-soft: #16301f;
-    --warn: #fbbf24;
-    --warn-soft: #362a10;
-    --bad: #f87171;
-    --bad-soft: #3a1b1b;
+    --bg: #0b141a;
+    --surface: #1f2c33;
+    --surface-2: #2a3942;
+    --ink: #e9edef;
+    --muted: #8696a0;
+    --line: #313d45;
+    --accent: #00a884;
+    --accent-hover: #06cf9c;
+    --accent-ink: #111b21;
+    --accent-soft: #0a332c;
+    --brand: #25d366;
+    --rail: #202c33;
+    --topbar: #202c33;
+    --topbar-ink: #e9edef;
+    --wallpaper: #0b141a;
+    --wallpaper-dot: rgba(233, 237, 239, 0.035);
+    --bubble-out: #005c4b;
+    --bubble-in: #202c33;
+    --tick: #53bdeb;
+    --ok: #00a884;
+    --ok-soft: #0a332c;
+    --warn: #ffbc2d;
+    --warn-soft: #3a2f12;
+    --bad: #f15c6d;
+    --bad-soft: #3d1b21;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
     color-scheme: dark;
   }
 }
 
 @theme inline {
-  --font-sans: 'Figtree Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-sans: 'Segoe UI', 'Helvetica Neue', Helvetica, 'Lucida Grande', Arial, Ubuntu, Cantarell, 'Fira Sans', sans-serif;
   --color-bg: var(--bg);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
@@ -56,6 +77,13 @@
   --color-accent-hover: var(--accent-hover);
   --color-accent-ink: var(--accent-ink);
   --color-accent-soft: var(--accent-soft);
+  --color-brand: var(--brand);
+  --color-rail: var(--rail);
+  --color-topbar: var(--topbar);
+  --color-topbar-ink: var(--topbar-ink);
+  --color-bubble-out: var(--bubble-out);
+  --color-bubble-in: var(--bubble-in);
+  --color-tick: var(--tick);
   --color-ok: var(--ok);
   --color-ok-soft: var(--ok-soft);
   --color-warn: var(--warn);
@@ -84,28 +112,35 @@
 }
 
 @utility card {
-  @apply rounded-2xl border border-line bg-surface;
+  @apply rounded-xl bg-surface;
+  box-shadow: var(--shadow);
 }
 @utility btn {
-  @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-full px-5 font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
 }
 @utility btn-primary {
   @apply btn bg-accent text-accent-ink hover:bg-accent-hover;
 }
 @utility btn-quiet {
-  @apply btn border border-line bg-surface text-ink hover:bg-surface-2;
+  @apply btn border border-line bg-surface text-accent hover:bg-surface-2;
 }
 @utility btn-danger {
-  @apply btn border border-bad/40 bg-surface text-bad hover:bg-bad-soft;
+  @apply btn border border-line bg-surface text-bad hover:bg-bad-soft;
 }
 @utility field {
-  @apply min-h-11 w-full rounded-xl border border-line bg-surface-2 px-3.5 text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:ring-3 focus:ring-accent/35;
+  @apply min-h-11 w-full rounded-lg border border-transparent bg-surface-2 px-3.5 text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:ring-3 focus:ring-accent/25;
 }
 @utility label {
   @apply mb-1.5 block text-sm font-semibold;
 }
 @utility hint {
   @apply text-sm text-muted;
+}
+/* WhatsApp chat wallpaper: flat colour with a faint dot pattern. */
+@utility wallpaper {
+  background-color: var(--wallpaper);
+  background-image: radial-gradient(var(--wallpaper-dot) 1px, transparent 1.2px);
+  background-size: 16px 16px;
 }
 
 @media (prefers-reduced-motion: reduce) {

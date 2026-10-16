@@ -71,6 +71,15 @@ already in**, via whatsapp-web.js (linked device). Code: `stdrd/wa-link-sender/`
 - Docker Desktop port-mapping hides client IPs (audit shows 172.x gateway); behind Caddy the real IP is recorded via TRUST_PROXY.
 - E2E left a test USER `nimali` in the owner's local DB (disable it if unwanted; users are never deleted).
 
+## UI theme: WhatsApp look (2026-10-16)
+- Owner asked for original WhatsApp colours + logo. Decisions: **WhatsApp Web shell** (desktop icon rail + panel header; mobile green
+  top bar with tabs; sign-in on a green band), and **WhatsApp logo + the name "Link Sender · for WhatsApp"** so it isn't mistaken for
+  official WhatsApp (Meta trademark).
+- Tokens in `web/src/index.css`: light teal `#008069` (buttons/text, passes contrast), brand `#25D366`, bubbles `#d9fdd3`, wallpaper
+  `#efeae2`; dark `#0b141a`/`#1f2c33`/`#2a3942`, accent `#00a884` with dark ink, bubble `#005c4b`. System font stack (Segoe UI…), Figtree removed.
+- Logo: `web/src/components/Logo.tsx` + `web/public/favicon.svg` (Simple Icons CC0 glyph on a green bubble); owner's 24×24 PNG is the
+  fallback `favicon.png`. Shell lives in `web/src/Shell.tsx`; Send preview is a real outgoing bubble (`ChatBubble.tsx`).
+
 ## Open ideas / not done
 - Healthcheck doesn't auto-restart an unhealthy container on plain Docker (only marks it); the in-app watchdog covers WhatsApp hangs.
 - `npm audit` flags `basic-ftp`/`extract-zip` from puppeteer's browser downloader. Not used at runtime in Docker (download skipped).

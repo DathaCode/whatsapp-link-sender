@@ -2,6 +2,7 @@ import { AlertTriangle, Check, ClipboardPaste, Send as SendIcon, Shuffle, X } fr
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { toast } from 'sonner';
 import { ApiError, api, errorMessage } from '../api';
+import { ChatBubble } from '../components/ChatBubble';
 import { ConfirmDialog } from '../components/Dialog';
 import { GroupPicker } from '../components/GroupPicker';
 import { JobProgress } from '../components/JobProgress';
@@ -318,8 +319,8 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
                 </button>
               )}
             </div>
-            <div className="rounded-2xl rounded-tl-sm bg-surface-2 px-4 py-3 break-words whitespace-pre-wrap" aria-live="polite">
-              {previewText}
+            <div aria-live="polite">
+              <ChatBubble text={previewText} />
             </div>
           </div>
         </section>
