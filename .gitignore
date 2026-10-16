@@ -1,0 +1,15 @@
+# Secrets and local state (app-specific rules are in wa-link-sender/.gitignore)
+.env
+.env.*
+!.env.example
+node_modules/
+*.log
+
+# Claude Code per-user settings
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

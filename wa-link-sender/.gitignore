@@ -1,0 +1,12 @@
+node_modules/
+dist/
+/public/
+*.tsbuildinfo
+.env
+.wwebjs_auth/
+.wwebjs_cache/
+data/
+.devdata/
+.devdata.log
+.cj
+*.log

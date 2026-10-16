@@ -1,0 +1,74 @@
+name: wa-link-sender
+
+services:
+  app:
+    build: .
+    image: wa-link-sender:latest
+    restart: unless-stopped
+    # tini as PID 1: forwards SIGTERM and reaps Chromium's child processes.
+    init: true
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+      WWEBJS_AUTH_DIR: /app/.wwebjs_auth
+      WWEBJS_CACHE_DIR: /app/.wwebjs_cache
+    # Local-only by default. Use the "proxy" profile (Caddy) to publish on a domain with HTTPS.
+    ports:
+      - "127.0.0.1:${PORT:-3100}:${PORT:-3100}"
+    volumes:
+      - wa_auth:/app/.wwebjs_auth # WhatsApp login (survives restarts and rebuilds)
+      - wa_cache:/app/.wwebjs_cache # cached WhatsApp Web version
+      - app_data:/app/data # SQLite: history, queue, templates, presets, settings
+    # Chromium needs more shared memory than Docker's 64 MB default.
+    shm_size: 1gb
+    # Chromium + Node normally use 400-900 MB; the cap stops a runaway browser from starving the host.
+    mem_limit: 2g
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:'+(process.env.PORT||3100)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  # Optional HTTPS reverse proxy. Start with:  docker compose --profile proxy up -d
+  # Needs DOMAIN in .env and ports 80/443 open to the internet.
+  caddy:
+    image: caddy:2.11-alpine
+    profiles: [proxy]
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    environment:
+      DOMAIN: ${DOMAIN:-}
+      APP_PORT: ${PORT:-3100}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  wa_auth:
+  wa_cache:
+  app_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,67 @@
+---
+name: project-memory
+description: "Living memory for the wa-link-sender project in stdrd/: goals, hard constraints, decisions with dates and reasons, what was broken and how it was fixed, verification status and open items. Read at the start of any session working in stdrd/, and update it whenever a decision is made, a gotcha is found, or verification status changes."
+---
+
+# wa-link-sender: project memory
+
+> Keep this file current. Add dated entries; don't silently rewrite history. Never store secret values here.
+
+## What it is
+Team tool: paste a Facebook / TikTok / YouTube post URL → send it to WhatsApp **groups our own number is
+already in**, via whatsapp-web.js (linked device). Code: `stdrd/wa-link-sender/`. Scope of work: only `stdrd/`.
+
+## Hard constraints (from the owner)
+- No feature for finding, joining or scraping groups. (`../public-groups/` is outside scope; don't touch or integrate it.)
+- No paid services. Keep it simple and maintainable by one person.
+- **Ask before major architecture changes** beyond the agreed plan.
+- Port 3000 is taken on the owner's PC → default `PORT=3100`.
+- Must run 24/7 in Docker on Windows (Docker Desktop/WSL2) now, Ubuntu + Docker Engine later.
+- If something needs the phone (QR scan), stop and tell the owner exactly what to do.
+
+## Stack (decided 2026-10-15)
+- Backend: Node 22 + Express 5 + **TypeScript** (owner chose TS everywhere), zod, pino, better-sqlite3, whatsapp-web.js **1.34.7** (pinned exact).
+- Frontend: React 19 + Vite 8 + Tailwind 4 (`web/`), sonner toasts, lucide icons, self-hosted Figtree font.
+  One accent colour: persimmon (`#c2410c` light / `#fb8a4c` dark) on warm neutrals; dark mode follows the system.
+- Docker: `node:22-bookworm-slim` multi-stage. **Owner approved Node 22 instead of the brief's Node 20** (Node 20 EOL April 2026; better-sqlite3 13 and vitest 5 need ≥ 22).
+  Debian `chromium` (v155 in bookworm at the time), non-root `node` user, `init: true`, `shm_size: 1gb`, healthcheck, json-file 10m×3.
+- Optional Caddy 2.11 under compose profile `proxy` (HTTPS, `DOMAIN` in .env).
+
+## What was broken in the original app (fixed 2026-10-15)
+1. `client.initialize()` had no `.catch()` → any start-up rejection (e.g. "Execution context was destroyed") **killed the whole Node process**.
+2. On `disconnected` it called `initialize()` again on the same dead client → second Chromium on the same profile.
+3. `/api/send` awaited `getChats()` outside try/catch → unhandled rejection crash on errors.
+4. Access key kept in `localStorage` and sent as a header; no rate limit; delays 5–12 s; history was a JSON file.
+5. Windows-only: long folder paths exceed MAX_PATH for Chromium profile files → instant WhatsApp logout loop.
+   (Reproduced in a deep scratch folder; the real project path is short enough.)
+
+## Key behaviours (keep them)
+- Every reconnect builds a **new** Client; generation counter ignores stale events; backoff 5 s→5 min; watchdog every 60 s.
+- Stale `Singleton*` locks removed at start (verified after `docker kill`).
+- Sends: one at a time, server-side pause/cap/hours, duplicate confirm, template rotation, `sendSeen:false`, typing indicator.
+- Interrupted (`sending`) items become **failed** on restart; never auto-resent.
+- Safety values in `.env` are defaults; Settings page overrides are stored in SQLite (`settings.safety`).
+
+## Verification status
+- 2026-10-15: unit tests 35/35 pass (`npm test`); typecheck clean (server + web).
+- Docker build OK (image ~1.6 GB, mostly Chromium + fonts). Container healthy; QR appears ~5–15 s after start at http://localhost:3100.
+- Verified: graceful SIGTERM restart, stale-lock cleanup after hard kill, queued job survives restart (waits `whatsapp_offline`),
+  duplicate warning (409), cross-origin POST blocked, login cookie flow, UI on phone and desktop in light and dark.
+- 2026-10-15 (owner linked phone "~Hiru News Alerts"): session **survives restarts and rebuilds** (verified twice, no QR).
+- 2026-10-15 bug found by owner: groups never loaded and "Refresh groups" gave a 500. Cause: whatsapp-web.js 1.34.7 `getChats()`
+  crashes inside WhatsApp Web (IndexedDB DataError while loading last messages). Fixed by reading the chat collection directly
+  (see whatsapp-web-js skill). Also fixed admin/membership detection (participants are LIDs now) and added group-load retries.
+  Verified: test group "10th dev" loads on reconnect and via Refresh.
+- **Pending:** owner to confirm a real send to the test group arrives (Send tab).
+
+## Open ideas / not done
+- Healthcheck doesn't auto-restart an unhealthy container on plain Docker (only marks it); the in-app watchdog covers WhatsApp hangs.
+- `npm audit` flags `basic-ftp`/`extract-zip` from puppeteer's browser downloader. Not used at runtime in Docker (download skipped).
+
+## Useful commands
+```powershell
+cd F:\projects\whatsapp-automation\stdrd\wa-link-sender
+docker compose up -d --build ; docker compose ps ; docker compose logs -f app
+npm test ; npm run typecheck
+curl http://localhost:3100/healthz
+```

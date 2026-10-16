@@ -1,0 +1,12 @@
+# Used only with:  docker compose --profile proxy up -d
+# Caddy gets and renews a free Let's Encrypt certificate for DOMAIN automatically.
+{$DOMAIN} {
+	# No compression: it would buffer the live progress stream (Server-Sent Events).
+	reverse_proxy app:{$APP_PORT} {
+		flush_interval -1
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}
