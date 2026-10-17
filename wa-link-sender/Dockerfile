@@ -19,6 +19,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ \
  && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
+# postinstall patches whatsapp-web.js (image-send fix, see scripts/patch-whatsapp-web.cjs).
+COPY scripts ./scripts
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 COPY tsconfig.json ./
 COPY src ./src

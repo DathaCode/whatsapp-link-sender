@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { SYSTEM } from './audit.js';
@@ -25,6 +26,17 @@ process.env.TZ = cfg.TZ;
 logger.level = cfg.LOG_LEVEL;
 const log = logger;
 if (process.env.ACCESS_KEY) log.warn('ACCESS_KEY is no longer used: sign-in now uses user accounts. You can remove it from .env.');
+
+// Image sends need the whatsapp-web.js media fix (applied at install time by scripts/patch-whatsapp-web.cjs).
+try {
+  const require_ = createRequire(import.meta.url);
+  const utils = path.join(path.dirname(require_.resolve('whatsapp-web.js/package.json')), 'src', 'util', 'Injected', 'Utils.js');
+  if (!fs.readFileSync(utils, 'utf8').includes('delete message.__x_id')) {
+    log.error('whatsapp-web.js is missing the media-send fix: image posts will fail. Reinstall dependencies (npm ci) so scripts/patch-whatsapp-web.cjs runs.');
+  }
+} catch {
+  /* best effort */
+}
 
 // whatsapp-web.js occasionally rejects promises from its own page listeners.
 // Log them instead of letting Node kill the whole server.

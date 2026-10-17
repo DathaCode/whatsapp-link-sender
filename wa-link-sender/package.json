@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && npm --prefix web run typecheck",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
-    "reset-admin": "node dist/cli.js reset-admin"
+    "reset-admin": "node dist/cli.js reset-admin",
+    "postinstall": "node scripts/patch-whatsapp-web.cjs"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.2.2",

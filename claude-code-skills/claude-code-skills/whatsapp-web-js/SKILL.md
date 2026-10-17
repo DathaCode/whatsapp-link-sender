@@ -32,6 +32,11 @@ description: "whatsapp-web.js (linked-device WhatsApp Web automation via Puppete
   /api/admin/groups/debug, also logs `group debug <id>` lines) shows every raw key (`rawKeys`).
 - Refresh = `GroupMetadata.update(wid)` per group (batches of 8, 15 s each) before reading, i.e. fresh from WhatsApp; groups whose
   `chat.groupMetadata` isn't loaded yet are no longer skipped.
+- **Image/media sends are broken in 1.34.7** on WhatsApp Web builds since ~2026-09-17: "Data passed to getter must include an id
+  property (it's how we memoize)". Cause: the media model's private `__x_id` is spread into the outgoing message. We apply
+  upstream PR #201923 (`delete message.__x_id`) at install time via `scripts/patch-whatsapp-web.cjs` (npm postinstall; the
+  Dockerfile copies scripts/ before `npm ci`). index.ts logs an error at start if the patch is missing; test/patch.test.ts checks it.
+  Drop the script when a whatsapp-web.js release includes the fix. This is NOT a ban: the number stays connected.
 - Group participants are identified by **LID** (`…@lid`), not phone numbers, so never match "me" by phone.
   Use `groupMetadata.participants.iAmMember()` / `iAmAdmin()` / `iAmSuperAdmin()`. The library's `isReadOnly` is just `announce`.
 - Right after linking, the chat list can be empty for a few seconds, so group loading retries (0/10/30/90 s).
