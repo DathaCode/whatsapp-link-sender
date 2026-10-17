@@ -38,7 +38,10 @@ export function JobProgress({ job, settings }: { job: Job; settings: SafetySetti
   if (job.status === 'done') headline = job.failed ? `Finished. ${job.failed} of ${job.total} failed.` : `Sent to all ${job.total} groups.`;
   else if (job.status === 'cancelled') headline = `Stopped. Sent to ${job.sent} of ${job.total} groups.`;
   else if (job.status === 'waiting') headline = waitReasonText(job.waitReason, settings);
-  else if (job.status === 'queued') headline = 'Waiting for the send before this one to finish.';
+  else if (job.status === 'queued')
+    headline = queue?.waitReason
+      ? `Waiting in line. ${waitReasonText(queue.waitReason, settings)}`
+      : `Waiting in line: ${queue && queue.queued > 0 ? 'other sends go first' : 'the send before this one is still going'}. Only one send runs at a time.`;
   else if (job.items?.some((i) => i.status === 'sending')) headline = `Sending ${done + 1} of ${job.total}…`;
   else if (countdown !== null && countdown > 0) headline = `Next group in ${countdown} s (a short pause keeps your number safe).`;
   else headline = `Sending ${Math.min(done + 1, job.total)} of ${job.total}…`;

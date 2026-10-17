@@ -7,7 +7,7 @@ import { ConfirmDialog, Dialog } from '../components/Dialog';
 import { GroupPicker, sharedCommunityWarning } from '../components/GroupPicker';
 import { JobProgress } from '../components/JobProgress';
 import { Badge } from '../components/StatusBadge';
-import { estimateSeconds, formatBytes, formatDateTime, formatDuration, pauseText, plural } from '../format';
+import { estimateSeconds, formatBytes, formatDateTime, formatDuration, pauseText, plural, waitReasonText, whenItSends } from '../format';
 import { useLive } from '../store';
 import type { Analysis, Duplicate, Group, ImageInfo, Job, SendOptions } from '../types';
 
@@ -241,6 +241,12 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
   else if (uploading) blocker = 'Uploading the image…';
   else if (count === 0) blocker = isAdmin ? 'Choose at least one group.' : 'Choose a group list, then the groups to send to.';
   const canSend = !blocker && !sending;
+  // Will it go out now? (Outside sending hours / daily limit reached / other sends ahead in the line.)
+  const later = whenItSends(settings, usage, weight, opts?.timeZone);
+  const ahead = live.queue?.activeJobId ? (live.queue.queued ?? 0) + 1 : 0;
+  const lineNote = ahead
+    ? `${plural(ahead, 'send')} ${ahead === 1 ? 'is' : 'are'} ahead in the line${live.queue?.waitReason ? ` (${waitReasonText(live.queue.waitReason, settings).replace(/^Paused: /, '').replace(/\.$/, '')})` : ''}; this one starts after ${ahead === 1 ? 'it' : 'them'}.`
+    : null;
 
   const doSend = async (flags: { confirmDuplicate?: boolean; confirmLinks?: boolean }) => {
     setSending(true);
@@ -524,6 +530,8 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
             <div className="min-w-0 flex-1 text-sm" aria-live="polite">
               {blocker ? (
                 <span className={paused || analysis?.tooLong || blockedLinks ? 'font-semibold text-bad' : 'text-muted'}>{blocker}</span>
+              ) : later || lineNote ? (
+                <span className="font-semibold text-warn">{later ?? lineNote}</span>
               ) : (
                 <span>
                   About <strong>{eta}</strong> for {plural(count, 'group')}
@@ -555,12 +563,18 @@ export function Send({ onShowHistory }: { onShowHistory: () => void }) {
           </li>
           {analysis?.links.some((l) => l.original !== l.cleaned) && <li>Tracking parameters were removed from links.</li>}
         </ul>
+        {(later || lineNote) && (
+          <p role="status" className="mt-3 flex items-start gap-2 rounded-xl bg-warn-soft px-3 py-2 text-sm text-warn">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+            <span>{[later, lineNote].filter(Boolean).join(' ')}</span>
+          </p>
+        )}
         <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <button type="button" className="btn-quiet" onClick={() => setConfirmOpen(false)} autoFocus>
             Back
           </button>
           <button type="button" className="btn-primary" disabled={sending} onClick={() => void doSend(pendingFlags)}>
-            <Upload className="size-4" aria-hidden /> {sending ? 'Sending…' : 'Send now'}
+            <Upload className="size-4" aria-hidden /> {sending ? 'Saving…' : later || lineNote ? 'Queue it' : 'Send now'}
           </button>
         </div>
       </Dialog>

@@ -61,6 +61,41 @@ export function waitReasonText(reason: WaitReason, s: SafetySettings | null): st
   }
 }
 
+/** Minutes since midnight in the app's time zone (TZ), not the browser's. */
+function minutesNow(tz?: string): number {
+  const parts = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: tz ?? appTimeZone }).formatToParts(new Date());
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
+  return get('hour') * 60 + get('minute');
+}
+const toMin = (hhmm: string) => {
+  const [h, m] = hhmm.split(':').map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+};
+
+/** True when sending is outside the configured hours right now (windows may cross midnight). */
+export function outsideSendingHours(s: SafetySettings, tz?: string): boolean {
+  const now = minutesNow(tz);
+  const a = toMin(s.windowStart);
+  const b = toMin(s.windowEnd);
+  const inside = a < b ? now >= a && now < b : now >= a || now < b;
+  return !inside;
+}
+
+/**
+ * Why a new send would not go out right away (null = it starts now, apart from the normal pause).
+ * Shown before sending so a parked send never looks like a hang.
+ */
+export function whenItSends(s: SafetySettings | null, usage: { used: number; cap: number } | null, weight: number, tz?: string): string | null {
+  if (!s) return null;
+  if (outsideSendingHours(s, tz)) {
+    return `It’s outside sending hours (${s.windowStart}–${s.windowEnd}), so this post will wait and go out automatically at ${s.windowStart}.`;
+  }
+  if (usage && usage.used + weight > usage.cap) {
+    return `Today’s limit of ${usage.cap} messages is reached, so this post will wait and go out automatically tomorrow at ${s.windowStart}.`;
+  }
+  return null;
+}
+
 export const CONNECTION_LABEL: Record<ConnectionStatus, string> = {
   linking: 'Waiting for QR scan',
   link_expired: 'QR expired',
